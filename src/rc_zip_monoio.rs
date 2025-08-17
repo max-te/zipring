@@ -43,8 +43,12 @@ pub async fn read_zip_from_file(file: &File) -> Result<Archive, Error> {
     }
 }
 
-pub async fn find_entry_compressed_data(file: &File, entry: Entry) -> Result<u64, Error> {
-    let mut buf = vec![0u8; 1024].into_boxed_slice();
+pub async fn find_entry_compressed_data(
+    file: &File,
+    entry: Entry,
+    buf: Option<Box<[u8]>>,
+) -> Result<(u64, Box<[u8]>), Error> {
+    let mut buf = buf.unwrap_or_else(|| vec![0u8; 1024].into_boxed_slice());
     let offset = entry.header_offset;
     let (res, slice) = file
         .read_at(IoBufMut::slice_mut(buf, 0..1024), offset)
@@ -54,6 +58,10 @@ pub async fn find_entry_compressed_data(file: &File, entry: Entry) -> Result<u64
 
     let mut i = Partial::new(buf.as_ref());
     let header = LocalFileHeader::parser.parse_next(&mut i).unwrap();
+    tracing::debug!(name: "find_entry_compressed_data", ?header);
 
-    Ok(offset + 30 + header.name.len() as u64 + header.extra.len() as u64)
+    Ok((
+        offset + 30 + header.name.len() as u64 + header.extra.len() as u64,
+        buf,
+    ))
 }
