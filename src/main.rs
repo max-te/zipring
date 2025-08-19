@@ -75,6 +75,9 @@ async fn echo(mut stream: TcpStream, file: &File, zip: &Archive) -> std::io::Res
         };
         tracing::debug!(?path, "GET request");
 
+        if path.is_empty() || path.ends_with('/') {
+            serve_index(&path, zip, &mut stream).await?;
+        }
         let Some(entry) = find_entry(zip, &path).await else {
             tracing::warn!(?path, "entry not found");
             let (res, _) = stream
@@ -228,4 +231,30 @@ async fn send_decompressed_entry(
             }
         }
     }
+}
+
+async fn serve_index(path: &str, zip: &Archive, stream: &mut TcpStream) -> std::io::Result<()> {
+    let mut listing = Vec::<u8>::with_capacity(32 * 1024);
+
+    listing.write(b"<!doctype html><html><ul>")?;
+    if !path.is_empty() {
+        listing.write(b"<li><a href=\"..\">..</a>\n")?;
+    }
+    for entry in zip.entries() {
+        if entry.name.starts_with(path) {
+            if let Some(name) = entry.sanitized_name() {
+                listing.write_fmt(format_args!("<li><a href=\"/{name}\">{name}</a>\n"))?;
+            }
+        }
+    }
+
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n",
+        listing.len()
+    )
+    .into_bytes();
+
+    stream.write_all(header).await.0?;
+    stream.write_all(listing).await.0?;
+    Ok(())
 }
