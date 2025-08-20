@@ -24,9 +24,13 @@ async fn main() {
     let file: &'static File = Box::leak(Box::new(file));
     let zip = rc_zip_monoio::read_zip_from_file(&file).await.unwrap();
     let zip: &'static Archive = Box::leak(Box::new(zip));
+
+    let mut tree = FsTreeNode::root();
     for entry in zip.entries() {
         println!("{:?}", entry.sanitized_name());
+        tree.insert(entry.clone());
     }
+    dbg!(tree);
 
     let listener = TcpListener::bind("127.0.0.1:50002").unwrap();
     println!("listening");
@@ -257,4 +261,96 @@ async fn serve_index(path: &str, zip: &Archive, stream: &mut TcpStream) -> std::
     stream.write_all(header).await.0?;
     stream.write_all(listing).await.0?;
     Ok(())
+}
+
+enum FsTreeNode {
+    Dir {
+        name: String,
+        children: Vec<FsTreeNode>,
+        entry: Option<Entry>,
+    },
+    File {
+        name: String,
+        entry: Entry,
+    },
+}
+
+impl std::fmt::Debug for FsTreeNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dir { name, children, .. } => f.debug_map().key(name).value(children).finish(),
+            Self::File { name, .. } => name.fmt(f),
+        }
+    }
+}
+
+impl FsTreeNode {
+    fn insert_at(&mut self, entry: Entry, path: String) {
+        let FsTreeNode::Dir { children, .. } = self else {
+            panic!("Cannot insert into FsTreeNode::File")
+        };
+
+        if let Some(separator) = path.chars().position(|c| c == '/') {
+            let mut head = path;
+            let mut tail = head.split_off(separator);
+
+            let existing_child = children.iter_mut().find(|ch| match ch {
+                FsTreeNode::Dir { name, .. } => head.eq(name),
+                _ => false,
+            });
+
+            let child = match existing_child {
+                Some(c) => c,
+                None => {
+                    let new_child = FsTreeNode::Dir {
+                        name: head.to_owned(),
+                        children: vec![],
+                        entry: None,
+                    };
+                    children.push(new_child);
+                    children.last_mut().unwrap()
+                }
+            };
+
+            if tail.len() > 1 {
+                // Recurse
+                let tail = tail.split_off(1);
+                child.insert_at(entry, tail);
+            } else {
+                // We are at the insertion site of a directory.
+                match child {
+                    FsTreeNode::Dir {
+                        entry: entry_slot, ..
+                    } => {
+                        let _ = entry_slot.insert(entry);
+                    }
+                    FsTreeNode::File { .. } => unreachable!(),
+                }
+            }
+        } else {
+            // Insertion site of a file
+            let new_child = FsTreeNode::File {
+                name: path.to_owned(),
+                entry,
+            };
+            children.push(new_child);
+        }
+    }
+
+    fn insert(&mut self, entry: Entry) {
+        let path = entry.name.to_owned();
+        self.insert_at(entry, path)
+    }
+
+    fn root() -> Self {
+        FsTreeNode::Dir {
+            name: String::new(),
+            children: Vec::new(),
+            entry: None,
+        }
+    }
+
+    fn find(path: &str) -> Option<&Self> {
+        None
+    }
 }
