@@ -8,7 +8,7 @@ use monoio::fs::File;
 use monoio::io::{AsyncReadRent, AsyncWriteRentExt};
 use monoio::net::{TcpListener, TcpStream};
 use rc_zip::fsm::EntryFsm;
-use rc_zip::parse::{Archive, Entry, Method};
+use rc_zip::parse::{Entry, Method};
 
 use crate::rc_zip_monoio::find_entry_compressed_data;
 
@@ -20,26 +20,29 @@ async fn main() {
         return;
     };
     let filepath = PathBuf::from(file_arg);
-    let file = monoio::fs::File::open(filepath).await.unwrap();
+    let file = monoio::fs::File::open(&filepath).await.unwrap();
     let file: &'static File = Box::leak(Box::new(file));
     let zip = rc_zip_monoio::read_zip_from_file(&file).await.unwrap();
-    let zip: &'static Archive = Box::leak(Box::new(zip));
 
     let mut tree = FsTreeNode::root();
     for entry in zip.entries() {
-        println!("{:?}", entry.sanitized_name());
         tree.insert(entry.clone());
     }
-    dbg!(tree);
+    tree.recursive_sort();
+    let tree: &'static FsTreeNode = Box::leak(Box::new(tree));
 
     let listener = TcpListener::bind("127.0.0.1:50002").unwrap();
-    println!("listening");
+    println!(
+        "Serving {} at http://{}",
+        filepath.display(),
+        listener.local_addr().unwrap()
+    );
     loop {
         let incoming = listener.accept().await;
         match incoming {
             Ok((stream, addr)) => {
                 println!("accepted a connection from {}", addr);
-                monoio::spawn(echo(stream, &file, &zip));
+                monoio::spawn(echo(stream, &file, &tree));
             }
             Err(e) => {
                 println!("accepted connection failed: {}", e);
@@ -49,16 +52,7 @@ async fn main() {
     }
 }
 
-async fn find_entry(zip: &Archive, path: &str) -> Option<Entry> {
-    for entry in zip.entries() {
-        if entry.name.eq_ignore_ascii_case(path) {
-            return Some(entry.clone());
-        }
-    }
-    None
-}
-
-async fn echo(mut stream: TcpStream, file: &File, zip: &Archive) -> std::io::Result<()> {
+async fn echo(mut stream: TcpStream, file: &File, tree: &FsTreeNode) -> std::io::Result<()> {
     let mut buf = vec![0u8; 8 * 1024].into_boxed_slice();
     let mut res;
     loop {
@@ -79,10 +73,7 @@ async fn echo(mut stream: TcpStream, file: &File, zip: &Archive) -> std::io::Res
         };
         tracing::debug!(?path, "GET request");
 
-        if path.is_empty() || path.ends_with('/') {
-            serve_index(&path, zip, &mut stream).await?;
-        }
-        let Some(entry) = find_entry(zip, &path).await else {
+        let Some(node) = tree.find(&path) else {
             tracing::warn!(?path, "entry not found");
             let (res, _) = stream
                 .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
@@ -90,7 +81,21 @@ async fn echo(mut stream: TcpStream, file: &File, zip: &Archive) -> std::io::Res
             res?;
             continue;
         };
-        buf = serve_entry(&mut stream, file, buf, entry).await?;
+        buf = serve_node(&mut stream, file, buf, node).await?;
+    }
+}
+
+async fn serve_node(
+    stream: &mut TcpStream,
+    file: &File,
+    buf: Box<[u8]>,
+    node: &FsTreeNode,
+) -> Result<Box<[u8]>, std::io::Error> {
+    match node {
+        FsTreeNode::Dir {
+            is_root, children, ..
+        } => serve_index(*is_root, children, stream).await.map(|_| buf),
+        FsTreeNode::File { entry, .. } => serve_entry(stream, file, buf, entry).await,
     }
 }
 
@@ -98,7 +103,7 @@ async fn serve_entry(
     stream: &mut TcpStream,
     file: &File,
     mut buf: Box<[u8]>,
-    entry: Entry,
+    entry: &Entry,
 ) -> Result<Box<[u8]>, std::io::Error> {
     let mime_type = mime_guess::from_path(&entry.name).first_or_text_plain();
     tracing::debug!(?mime_type);
@@ -161,7 +166,7 @@ async fn send_compressed_entry(
     stream: &mut TcpStream,
     file: &File,
     buf: Box<[u8]>,
-    entry: Entry,
+    entry: &Entry,
 ) -> Result<Box<[u8]>, std::io::Error> {
     let mut len = entry.compressed_size as usize;
     let mut gzip_trailer = [0u8; 8];
@@ -202,11 +207,11 @@ async fn send_decompressed_entry(
     stream: &mut TcpStream,
     file: &File,
     mut buf: Box<[u8]>,
-    entry: Entry,
+    entry: &Entry,
 ) -> Result<Box<[u8]>, std::io::Error> {
     let mut res;
     let mut offset = entry.header_offset;
-    let mut fsm = EntryFsm::new(Some(entry), None);
+    let mut fsm = EntryFsm::new(None, None);
     loop {
         if fsm.wants_read() {
             let dst = fsm.space();
@@ -237,18 +242,36 @@ async fn send_decompressed_entry(
     }
 }
 
-async fn serve_index(path: &str, zip: &Archive, stream: &mut TcpStream) -> std::io::Result<()> {
+static INDEX_PREAMBLE: &'static str = r#"
+<!DOCTYPE html>
+<html><style>ul{list-style:"\1F4C4";}.dir{list-style:"\1F4C1";}.top{list-style:"\1F4C2";}</style><ul>
+"#;
+
+async fn serve_index(
+    is_root: bool,
+    entries: &[FsTreeNode],
+    stream: &mut TcpStream,
+) -> std::io::Result<()> {
     let mut listing = Vec::<u8>::with_capacity(32 * 1024);
 
-    listing.write(b"<!doctype html><html><ul>")?;
-    if !path.is_empty() {
-        listing.write(b"<li><a href=\"..\">..</a>\n")?;
+    listing.write(INDEX_PREAMBLE.as_bytes())?;
+    if !is_root {
+        listing.write(b"<li class=top><a href=\"..\">..</a>\n")?;
     }
-    for entry in zip.entries() {
-        if entry.name.starts_with(path) {
-            if let Some(name) = entry.sanitized_name() {
-                listing.write_fmt(format_args!("<li><a href=\"/{name}\">{name}</a>\n"))?;
-            }
+    for entry in entries {
+        if let FsTreeNode::Dir { .. } = entry {
+            listing.write_fmt(format_args!(
+                "<li class=dir><a href=\"./{name}/\">{name}</a>\n",
+                name = entry.name()
+            ))?;
+        }
+    }
+    for entry in entries {
+        if let FsTreeNode::File { .. } = entry {
+            listing.write_fmt(format_args!(
+                "<li><a href=\"./{name}\">{name}</a>\n",
+                name = entry.name()
+            ))?;
         }
     }
 
@@ -268,6 +291,7 @@ enum FsTreeNode {
         name: String,
         children: Vec<FsTreeNode>,
         entry: Option<Entry>,
+        is_root: bool,
     },
     File {
         name: String,
@@ -306,6 +330,7 @@ impl FsTreeNode {
                         name: head.to_owned(),
                         children: vec![],
                         entry: None,
+                        is_root: false,
                     };
                     children.push(new_child);
                     children.last_mut().unwrap()
@@ -347,10 +372,40 @@ impl FsTreeNode {
             name: String::new(),
             children: Vec::new(),
             entry: None,
+            is_root: true,
         }
     }
 
-    fn find(path: &str) -> Option<&Self> {
-        None
+    fn name(&self) -> &str {
+        match self {
+            FsTreeNode::Dir { name, .. } => name,
+            FsTreeNode::File { name, .. } => name,
+        }
+    }
+
+    fn find(&self, path: &str) -> Option<&Self> {
+        if path.is_empty() || path == "/" {
+            return Some(&self);
+        }
+
+        let (head, tail) = match path.chars().position(|c| c == '/') {
+            Some(sep) => (&path[..sep], &path[sep + 1..]),
+            None => (path, ""),
+        };
+
+        match self {
+            FsTreeNode::Dir { children, .. } => children
+                .iter()
+                .find(|c| c.name() == head)
+                .and_then(|c| c.find(tail)),
+            FsTreeNode::File { .. } => None,
+        }
+    }
+
+    fn recursive_sort(&mut self) {
+        if let FsTreeNode::Dir { children, .. } = self {
+            children.sort_by(|a, b| PartialOrd::partial_cmp(&a.name(), &b.name()).unwrap());
+            children.iter_mut().for_each(FsTreeNode::recursive_sort);
+        }
     }
 }

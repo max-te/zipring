@@ -45,7 +45,7 @@ pub async fn read_zip_from_file(file: &File) -> Result<Archive, Error> {
 
 pub async fn find_entry_compressed_data(
     file: &File,
-    entry: Entry,
+    entry: &Entry,
     buf: Option<Box<[u8]>>,
 ) -> Result<(u64, Box<[u8]>), Error> {
     let mut buf = buf.unwrap_or_else(|| vec![0u8; 1024].into_boxed_slice());
