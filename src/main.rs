@@ -242,11 +242,7 @@ async fn send_decompressed_entry(
     }
 }
 
-static INDEX_PREAMBLE: &'static str = r#"
-<!DOCTYPE html>
-<html><style>ul{list-style:"\1F4C4";}.dir{list-style:"\1F4C1";}.top{list-style:"\1F4C2";}</style><ul>
-"#;
-
+static INDEX_PREAMBLE: &'static str = include_str!("index.html");
 async fn serve_index(
     is_root: bool,
     entries: &[FsTreeNode],
