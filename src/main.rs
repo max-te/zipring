@@ -5,8 +5,9 @@ mod response;
 use std::path::PathBuf;
 
 use monoio::fs::File;
-use monoio::io::{AsyncReadRent, AsyncWriteRentExt};
+use monoio::io::{AsyncReadRent, AsyncWriteRentExt, OwnedReadHalf, Splitable};
 use monoio::net::{TcpListener, TcpStream};
+use tracing::Instrument;
 
 use crate::fstree::FsTreeNode;
 use crate::response::serve_node;
@@ -36,50 +37,99 @@ async fn main() {
         filepath.display(),
         listener.local_addr().unwrap()
     );
+    let mut conid = 0usize;
     loop {
         let incoming = listener.accept().await;
         match incoming {
             Ok((stream, addr)) => {
                 println!("accepted a connection from {}", addr);
-                monoio::spawn(serve(stream, &file, &tree));
+                let span = tracing::info_span!("connection", id = conid);
+                monoio::spawn(serve(stream, &file, &tree).instrument(span));
             }
             Err(e) => {
                 println!("accepted connection failed: {}", e);
                 return;
             }
         }
+        conid += 1;
     }
 }
 
-async fn serve(mut stream: TcpStream, file: &File, tree: &FsTreeNode) -> std::io::Result<()> {
-    let mut buf = vec![0u8; 8 * 1024].into_boxed_slice();
-    let mut res;
-    loop {
-        (res, buf) = stream.read(buf).await;
-        if res? == 0 {
-            return Ok(());
-        }
-        if !buf.starts_with(b"GET ") {
-            return Ok(());
-        }
-        let path = &buf[b"GET /".len()..];
-        let Some(br) = path.iter().position(|&c| c == b' ') else {
-            return Ok(());
-        };
-        let path = &path[..br];
-        let Ok(path) = percent_encoding::percent_decode(path).decode_utf8() else {
-            return Ok(());
-        };
-        tracing::debug!(?path, "GET request");
+async fn serve(stream: TcpStream, file: &File, tree: &FsTreeNode) -> std::io::Result<()> {
+    let (s, r) = async_channel::bounded(5);
+    let (mut stream_read, mut stream_write) = stream.into_split();
 
-        let Some(node) = tree.find(&path) else {
-            tracing::warn!(?path, "entry not found");
-            let (res, _) = stream
-                .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
-                .await;
-            res?;
-            continue;
-        };
-        buf = serve_node(&mut stream, file, buf, node).await?;
+    let recv_span = tracing::info_span!("receiver");
+    let receiver = async move {
+        let mut buf = vec![0u8; 1024].into_boxed_slice();
+        loop {
+            let request;
+            (request, buf) = parse_next_request(&mut stream_read, buf).await;
+            let Some(path) = request else {
+                break;
+            };
+            s.send(path).await.unwrap();
+        }
     }
+    .instrument(recv_span);
+
+    let send_span = tracing::info_span!("sender");
+    let sender = async {
+        let mut buf = vec![0u8; 16 * 1024].into_boxed_slice();
+        loop {
+            let Ok(path) = r.recv().await else {
+                break;
+            };
+            let respond_span = tracing::info_span!("response", path = path).entered();
+            let Some(node) = tree.find(&path) else {
+                tracing::warn!(?path, "entry not found");
+                let (res, _) = stream_write
+                    .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                    .instrument(respond_span.exit())
+                    .await;
+                if let Err(_) = res {
+                    break;
+                }
+                continue;
+            };
+            buf = match serve_node(&mut stream_write, file, buf, node)
+                .instrument(respond_span.exit())
+                .await
+            {
+                Ok(b) => b,
+                Err(_) => break,
+            };
+        }
+    }
+    .instrument(send_span);
+
+    monoio::join!(receiver, sender);
+    Ok(())
+}
+
+async fn parse_next_request(
+    stream: &mut OwnedReadHalf<TcpStream>,
+    buf: Box<[u8]>,
+) -> (Option<String>, Box<[u8]>) {
+    let (res, buf) = stream.read(buf).await;
+    let Ok(len) = res else { return (None, buf) };
+    if len == 0 {
+        return (None, buf);
+    }
+
+    if !buf.starts_with(b"GET ") {
+        return (None, buf);
+    }
+    let path = &buf[b"GET /".len()..];
+    let Some(br) = path.iter().position(|&c| c == b' ') else {
+        return (None, buf);
+    };
+    let path = &path[..br];
+    let Ok(path) = percent_encoding::percent_decode(path).decode_utf8() else {
+        return (None, buf);
+    };
+    let path = path.to_string();
+    tracing::debug!(?path, "GET request");
+
+    (Some(path), buf)
 }

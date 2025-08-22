@@ -3,6 +3,7 @@ use crate::rc_zip_monoio::find_entry_compressed_data;
 use monoio::buf::IoBufMut;
 use monoio::fs::File;
 use monoio::io::AsyncWriteRentExt;
+use monoio::io::OwnedWriteHalf;
 use monoio::net::TcpStream;
 use rc_zip::fsm::EntryFsm;
 use rc_zip::parse::Entry;
@@ -11,7 +12,7 @@ use std::io::Cursor;
 use std::io::Write;
 
 pub(crate) async fn serve_node(
-    stream: &mut TcpStream,
+    stream: &mut OwnedWriteHalf<TcpStream>,
     file: &File,
     buf: Box<[u8]>,
     node: &fstree::FsTreeNode,
@@ -25,7 +26,7 @@ pub(crate) async fn serve_node(
 }
 
 pub(crate) async fn serve_entry(
-    stream: &mut TcpStream,
+    stream: &mut OwnedWriteHalf<TcpStream>,
     file: &File,
     mut buf: Box<[u8]>,
     entry: &Entry,
@@ -55,7 +56,7 @@ pub(crate) async fn serve_entry(
         _ => (),
     }
 
-    cur.write(b"Keep-Alive: timeout=20, max=200\r\nContent-Length: ")?;
+    cur.write(b"Content-Length: ")?;
     let mut intbuf = itoa::Buffer::new();
     cur.write(
         intbuf
@@ -84,11 +85,12 @@ pub(crate) async fn serve_entry(
     } else {
         send_decompressed_entry(stream, file, buf, entry).await?
     };
+    tracing::debug!("finished serving entry");
     Ok(buf)
 }
 
 pub(crate) async fn send_compressed_entry(
-    stream: &mut TcpStream,
+    stream: &mut OwnedWriteHalf<TcpStream>,
     file: &File,
     buf: Box<[u8]>,
     entry: &Entry,
@@ -106,6 +108,7 @@ pub(crate) async fn send_compressed_entry(
     }
 
     let (mut offset, mut buf) = find_entry_compressed_data(&file, entry, Some(buf)).await?;
+    tracing::debug!("found compressed data");
     while len > 0 {
         let bytes_to_read = len.min(buf.len());
         let (res, slice) = file
@@ -129,7 +132,7 @@ pub(crate) async fn send_compressed_entry(
 }
 
 pub(crate) async fn send_decompressed_entry(
-    stream: &mut TcpStream,
+    stream: &mut OwnedWriteHalf<TcpStream>,
     file: &File,
     mut buf: Box<[u8]>,
     entry: &Entry,
@@ -172,7 +175,7 @@ pub(crate) static INDEX_PREAMBLE: &'static str = include_str!("index.html");
 pub(crate) async fn serve_index(
     is_root: bool,
     entries: &[fstree::FsTreeNode],
-    stream: &mut TcpStream,
+    stream: &mut OwnedWriteHalf<TcpStream>,
 ) -> std::io::Result<()> {
     let mut listing = Vec::<u8>::with_capacity(32 * 1024);
 
