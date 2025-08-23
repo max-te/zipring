@@ -2,9 +2,10 @@ mod fstree;
 mod rc_zip_monoio;
 mod response;
 
+use std::num::NonZero;
 use std::path::PathBuf;
 
-use monoio::buf::{IoVecBufMut, VecBuf};
+use monoio::IoUringDriver;
 use monoio::fs::File;
 use monoio::io::{AsyncReadRent, AsyncWriteRentExt, OwnedReadHalf, Splitable};
 use monoio::net::{TcpListener, TcpStream};
@@ -13,14 +14,37 @@ use tracing::Instrument;
 use crate::fstree::FsTreeNode;
 use crate::response::serve_node;
 
-#[monoio::main]
-async fn main() {
+fn main() {
     tracing_subscriber::fmt::init();
     let Some(file_arg) = std::env::args().nth(1) else {
         println!("Usage: zipring ZIPFILE");
         return;
     };
+
     let filepath = PathBuf::from(file_arg);
+    let n_threads = std::thread::available_parallelism()
+        .map(NonZero::get)
+        .unwrap_or(4);
+
+    let threads: Vec<_> = (0..n_threads)
+        .map(|i| {
+            let path = filepath.clone();
+            std::thread::spawn(move || {
+                let mut rt = monoio::RuntimeBuilder::<IoUringDriver>::new()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(inner_main(i, path))
+            })
+        })
+        .collect();
+
+    for t in threads {
+        let _ = t.join();
+    }
+}
+
+async fn inner_main(threadid: usize, filepath: PathBuf) {
     let file = monoio::fs::File::open(&filepath).await.unwrap();
     let file: &'static File = Box::leak(Box::new(file));
     let zip = rc_zip_monoio::read_zip_from_file(&file).await.unwrap();
@@ -33,24 +57,26 @@ async fn main() {
     let tree: &'static FsTreeNode = Box::leak(Box::new(tree));
 
     let listener = TcpListener::bind("127.0.0.1:50002").unwrap();
-    println!(
-        "Serving {} at http://{}",
-        filepath.display(),
-        listener.local_addr().unwrap()
-    );
+    if threadid == 0 {
+        tracing::info!(
+            "Serving {} at http://{}",
+            filepath.display(),
+            listener.local_addr().unwrap()
+        );
+    }
     let mut conid = 0usize;
     loop {
         let incoming = listener.accept().await;
         match incoming {
             Ok((stream, addr)) => {
-                println!("accepted a connection from {}", addr);
-                let span = tracing::info_span!("connection", id = conid);
+                let span =
+                    tracing::info_span!("connection", thread = threadid, conid = conid).entered();
+                tracing::info!("accepted a connection from {}", addr);
                 let _ = stream.set_nodelay(true);
-                monoio::spawn(serve(stream, &file, &tree).instrument(span));
+                monoio::spawn(serve(stream, &file, &tree).instrument(span.exit()));
             }
             Err(e) => {
-                println!("accepted connection failed: {}", e);
-                return;
+                tracing::error!(?threadid, "accepting connection failed: {}", e);
             }
         }
         conid += 1;
