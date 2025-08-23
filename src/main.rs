@@ -4,6 +4,7 @@ mod response;
 
 use std::path::PathBuf;
 
+use monoio::buf::{IoVecBufMut, VecBuf};
 use monoio::fs::File;
 use monoio::io::{AsyncReadRent, AsyncWriteRentExt, OwnedReadHalf, Splitable};
 use monoio::net::{TcpListener, TcpStream};
@@ -44,6 +45,7 @@ async fn main() {
             Ok((stream, addr)) => {
                 println!("accepted a connection from {}", addr);
                 let span = tracing::info_span!("connection", id = conid);
+                let _ = stream.set_nodelay(true);
                 monoio::spawn(serve(stream, &file, &tree).instrument(span));
             }
             Err(e) => {
