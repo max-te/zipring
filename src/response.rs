@@ -67,7 +67,14 @@ pub(crate) async fn serve_entry(
             })
             .as_bytes(),
     )?;
-    cur.write_all(b"\r\n\r\n")?;
+
+    cur.write_all(b"\r\nETag: \"")?;
+    let mut etag = [0u8; 8];
+    const_hex::encode_to_slice(entry.crc32.to_le_bytes(), &mut etag)
+        .expect("u32 should always be encodable to 8 hex chars");
+    cur.write_all(&etag)?;
+
+    cur.write_all(b"\"\r\n\r\n")?;
 
     // Send header
     let n = cur.position() as usize;
