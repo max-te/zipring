@@ -99,7 +99,7 @@ impl FsTreeNode {
 
     pub(crate) fn find(&self, path: &str) -> Option<&Self> {
         if path.is_empty() || path == "/" {
-            return Some(&self);
+            return Some(self);
         }
 
         let (head, tail) = match path.chars().position(|c| c == '/') {

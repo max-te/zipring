@@ -38,27 +38,27 @@ pub(crate) async fn serve_entry(
 
     // Assemble header
     let mut cur = Cursor::new(buf);
-    cur.write(b"HTTP/1.1 200 OK\r\nContent-Type: ")?;
-    cur.write(mime_type.essence_str().as_bytes())?;
-    cur.write(b"\r\n")?;
+    cur.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: ")?;
+    cur.write_all(mime_type.essence_str().as_bytes())?;
+    cur.write_all(b"\r\n")?;
 
     tracing::debug!(?entry.method);
     match entry.method {
         Method::Deflate => {
-            cur.write(b"Content-Encoding: gzip\r\n")?;
+            cur.write_all(b"Content-Encoding: gzip\r\n")?;
             send_compressed = true;
             compression_header_size = 18;
         }
         Method::Zstd => {
-            cur.write(b"Content-Encoding: zstd\r\n")?;
+            cur.write_all(b"Content-Encoding: zstd\r\n")?;
             send_compressed = true;
         }
         _ => (),
     }
 
-    cur.write(b"Content-Length: ")?;
+    cur.write_all(b"Content-Length: ")?;
     let mut intbuf = itoa::Buffer::new();
-    cur.write(
+    cur.write_all(
         intbuf
             .format(if send_compressed {
                 entry.compressed_size + compression_header_size
@@ -67,7 +67,7 @@ pub(crate) async fn serve_entry(
             })
             .as_bytes(),
     )?;
-    cur.write(b"\r\n\r\n")?;
+    cur.write_all(b"\r\n\r\n")?;
 
     // Send header
     let n = cur.position() as usize;
@@ -107,7 +107,7 @@ pub(crate) async fn send_compressed_entry(
         (gzip_trailer[4..8]).copy_from_slice(&entry.uncompressed_size.to_le_bytes()[0..4]);
     }
 
-    let (mut offset, mut buf) = find_entry_compressed_data(&file, entry, Some(buf)).await?;
+    let (mut offset, mut buf) = find_entry_compressed_data(file, entry, Some(buf)).await?;
     tracing::debug!("found compressed data");
     while len > 0 {
         let bytes_to_read = len.min(buf.len());
@@ -170,7 +170,7 @@ pub(crate) async fn send_decompressed_entry(
     }
 }
 
-pub(crate) static INDEX_PREAMBLE: &'static str = include_str!("index.html");
+pub(crate) static INDEX_PREAMBLE: &str = include_str!("index.html");
 
 pub(crate) async fn serve_index(
     is_root: bool,
@@ -179,9 +179,9 @@ pub(crate) async fn serve_index(
 ) -> std::io::Result<()> {
     let mut listing = Vec::<u8>::with_capacity(32 * 1024);
 
-    listing.write(INDEX_PREAMBLE.as_bytes())?;
+    listing.write_all(INDEX_PREAMBLE.as_bytes())?;
     if !is_root {
-        listing.write(b"<li class=top><a href=\"..\">..</a>\n")?;
+        listing.write_all(b"<li class=top><a href=\"..\">..</a>\n")?;
     }
     for entry in entries {
         if let fstree::FsTreeNode::Dir { .. } = entry {

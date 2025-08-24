@@ -47,7 +47,7 @@ fn main() {
 async fn inner_main(threadid: usize, filepath: PathBuf) {
     let file = monoio::fs::File::open(&filepath).await.unwrap();
     let file: &'static File = Box::leak(Box::new(file));
-    let zip = rc_zip_monoio::read_zip_from_file(&file).await.unwrap();
+    let zip = rc_zip_monoio::read_zip_from_file(file).await.unwrap();
 
     let mut tree = FsTreeNode::root();
     for entry in zip.entries() {
@@ -73,7 +73,7 @@ async fn inner_main(threadid: usize, filepath: PathBuf) {
                     tracing::info_span!("connection", thread = threadid, conid = conid).entered();
                 tracing::info!("accepted a connection from {}", addr);
                 let _ = stream.set_nodelay(true);
-                monoio::spawn(serve(stream, &file, &tree).instrument(span.exit()));
+                monoio::spawn(serve(stream, file, tree).instrument(span.exit()));
             }
             Err(e) => {
                 tracing::error!(?threadid, "accepting connection failed: {}", e);
@@ -115,7 +115,7 @@ async fn serve(stream: TcpStream, file: &File, tree: &FsTreeNode) -> std::io::Re
                     .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
                     .instrument(respond_span.exit())
                     .await;
-                if let Err(_) = res {
+                if res.is_err() {
                     break;
                 }
                 continue;
