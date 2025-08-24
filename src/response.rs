@@ -74,7 +74,7 @@ pub(crate) async fn serve_entry(
         .expect("u32 should always be encodable to 8 hex chars");
     cur.write_all(&etag)?;
 
-    cur.write_all(b"\"\r\n\r\n")?;
+    cur.write_all(b"\"\r\nCache-control: max-age=180, public\r\n\r\n")?;
 
     // Send header
     let n = cur.position() as usize;

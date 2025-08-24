@@ -97,6 +97,13 @@ impl FsTreeNode {
         }
     }
 
+    pub(crate) fn entry(&self) -> Option<&Entry> {
+        match self {
+            FsTreeNode::Dir { entry, .. } => entry.as_ref(),
+            FsTreeNode::File { entry, .. } => Some(entry),
+        }
+    }
+
     pub(crate) fn find(&self, path: &str) -> Option<&Self> {
         if path.is_empty() || path == "/" {
             return Some(self);
@@ -106,6 +113,9 @@ impl FsTreeNode {
             Some(sep) => (&path[..sep], &path[sep + 1..]),
             None => (path, ""),
         };
+        if head.is_empty() {
+            return self.find(tail);
+        }
 
         match self {
             FsTreeNode::Dir { children, .. } => children
