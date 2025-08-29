@@ -787,7 +787,8 @@ dependencies = [
 [[package]]
 name = "rc-zip"
 version = "5.3.1"
-source = "git+https://github.com/max-te/rc-zip?rev=a8adaea094610eeda6d0c5d24b293a8164f0ec02#a8adaea094610eeda6d0c5d24b293a8164f0ec02"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebde715984a68b306e5b41884cbcb8158e0e1dbe6e2841212983333b1662c416"
 dependencies = [
  "chardetng",
  "chrono",
