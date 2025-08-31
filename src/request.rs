@@ -16,6 +16,9 @@ pub enum Request {
 }
 
 const BAD_REQUEST: &str = "400 Bad Request";
+const URI_TOO_LONG: &str = "414 URI Too Long";
+const HEADER_TOO_LONG: &str = "431 Request Header Fields Too Large";
+const METHOD_NOT_ALLOWED: &str = "405 Method Not Allowed";
 
 pub async fn run_receiver(
     requests_channel: async_channel::Sender<Request>,
@@ -48,12 +51,31 @@ async fn parse_next_request(
 
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
-    let Ok(body_offset) = req.parse(&buf) else {
-        tracing::debug!("could not parse request");
-        return (None, buf);
+    let body_offset = match req.parse(&buf) {
+        Ok(body_offset) => body_offset,
+        Err(httparse::Error::TooManyHeaders) => {
+            return (
+                Some(Request::Bad {
+                    status: HEADER_TOO_LONG,
+                }),
+                buf,
+            );
+        }
+        _ => {
+            tracing::debug!("could not parse request");
+            return (None, buf);
+        }
     };
     if body_offset.is_partial() {
         tracing::debug!("partial request");
+        if req.path.is_none() {
+            return (
+                Some(Request::Bad {
+                    status: URI_TOO_LONG,
+                }),
+                buf,
+            );
+        }
         return (
             Some(Request::Bad {
                 status: BAD_REQUEST,
@@ -64,7 +86,12 @@ async fn parse_next_request(
 
     if req.method != Some("GET") {
         tracing::debug!("unsupported method");
-        return (None, buf);
+        return (
+            Some(Request::Bad {
+                status: METHOD_NOT_ALLOWED,
+            }),
+            buf,
+        );
     }
 
     let path = req
@@ -72,7 +99,12 @@ async fn parse_next_request(
         .expect("path should be set when parsing is complete");
     let Ok(path) = percent_encoding::percent_decode(path.as_bytes()).decode_utf8() else {
         tracing::error!("path not decodable");
-        return (None, buf);
+        return (
+            Some(Request::Bad {
+                status: BAD_REQUEST,
+            }),
+            buf,
+        );
     };
     let path = path.to_string();
 
