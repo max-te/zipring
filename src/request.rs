@@ -1,5 +1,5 @@
 use monoio::{
-    io::{AsyncReadRent as _, OwnedReadHalf},
+    io::{AsyncReadRent, OwnedReadHalf},
     net::TcpStream,
 };
 
@@ -36,7 +36,12 @@ async fn parse_next_request(
 
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
-    let _body_offset = req.parse(&buf);
+    let Ok(body_offset) = req.parse(&buf) else {
+        return (None, buf);
+    };
+    if body_offset.is_partial() {
+        return (None, buf);
+    }
 
     if req.method != Some("GET") {
         return (None, buf);
