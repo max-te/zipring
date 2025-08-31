@@ -127,17 +127,20 @@ async fn serve(stream: TcpStream, file: &File, tree: &FsTreeNode) -> std::io::Re
                 tracing::debug!(?request.path, "etag matches");
                 const NOT_MODIFIED_TEMPLATE: &[u8] =
                     b"HTTP/1.1 304 Not Modified\r\nETag: \"xxxxxxxx\"\r\n\r\n";
-                let mut response = vec![0u8; const { NOT_MODIFIED_TEMPLATE.len() }];
-                response.copy_from_slice(NOT_MODIFIED_TEMPLATE);
+                const CRC_OFFSET: usize =
+                    const { position(NOT_MODIFIED_TEMPLATE, b'x').expect("template sould have x") };
 
-                let etag = &mut response[34..{ 34 + 8 }];
+                (buf[0..NOT_MODIFIED_TEMPLATE.len()]).copy_from_slice(NOT_MODIFIED_TEMPLATE);
+                let etag = &mut buf[CRC_OFFSET..{ CRC_OFFSET + size_of::<u32>() * 2 }];
                 const_hex::encode_to_slice(entry.crc32.to_le_bytes(), etag).unwrap();
-                let len = response.len();
-                let slice = IoBufMut::slice_mut(response, 0..len);
-                let (res, _) = stream_write
+
+                let slice = IoBufMut::slice_mut(buf, 0..NOT_MODIFIED_TEMPLATE.len());
+                let (res, slice) = stream_write
                     .write_all(slice)
                     .instrument(respond_span.exit())
                     .await;
+                buf = slice.into_inner();
+
                 if res.is_err() {
                     break;
                 }
@@ -210,4 +213,15 @@ async fn parse_next_request(
         }),
         buf,
     )
+}
+
+const fn position(haystack: &[u8], needle: u8) -> Option<usize> {
+    let mut idx = 0;
+    while idx < haystack.len() {
+        if haystack[idx] == needle {
+            return Some(idx);
+        }
+        idx += 1;
+    }
+    None
 }
