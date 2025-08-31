@@ -85,80 +85,90 @@ async fn inner_main(threadid: usize, filepath: PathBuf) {
 }
 
 async fn serve(stream: TcpStream, file: &File, tree: &FsTreeNode) -> std::io::Result<()> {
-    let (s, r) = async_channel::bounded(5);
-    let (mut stream_read, mut stream_write) = stream.into_split();
+    let (requests_channel_in, requests_channel_out) = async_channel::bounded(5);
+    let (stream_read, stream_write) = stream.into_split();
 
     let recv_span = tracing::info_span!("receiver");
-    let receiver = async move {
-        let mut buf = vec![0u8; 1024].into_boxed_slice();
-        loop {
-            let request;
-            (request, buf) = parse_next_request(&mut stream_read, buf).await;
-            if let Some(request) = request {
-                s.send(request).await.unwrap();
-            };
-        }
-    }
-    .instrument(recv_span);
+    let receiver = run_receiver(requests_channel_in, stream_read).instrument(recv_span);
 
     let send_span = tracing::info_span!("sender");
-    let sender = async {
-        let mut buf = vec![0u8; 16 * 1024].into_boxed_slice();
-        loop {
-            let Ok(request) = r.recv().await else {
-                break;
-            };
-            let respond_span = tracing::info_span!("response", path = request.path).entered();
-            let Some(node) = tree.find(&request.path) else {
-                tracing::warn!(?request.path, "entry not found");
-                let (res, _) = stream_write
-                    .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
-                    .instrument(respond_span.exit())
-                    .await;
-                if res.is_err() {
-                    break;
-                }
-                continue;
-            };
-            if let Some(crc32) = request.if_none_match
-                && let Some(entry) = node.entry()
-                && entry.crc32 == crc32
-            {
-                tracing::debug!(?request.path, "etag matches");
-                const NOT_MODIFIED_TEMPLATE: &[u8] =
-                    b"HTTP/1.1 304 Not Modified\r\nETag: \"xxxxxxxx\"\r\n\r\n";
-                const CRC_OFFSET: usize =
-                    const { position(NOT_MODIFIED_TEMPLATE, b'x').expect("template sould have x") };
-
-                (buf[0..NOT_MODIFIED_TEMPLATE.len()]).copy_from_slice(NOT_MODIFIED_TEMPLATE);
-                let etag = &mut buf[CRC_OFFSET..{ CRC_OFFSET + size_of::<u32>() * 2 }];
-                const_hex::encode_to_slice(entry.crc32.to_le_bytes(), etag).unwrap();
-
-                let slice = IoBufMut::slice_mut(buf, 0..NOT_MODIFIED_TEMPLATE.len());
-                let (res, slice) = stream_write
-                    .write_all(slice)
-                    .instrument(respond_span.exit())
-                    .await;
-                buf = slice.into_inner();
-
-                if res.is_err() {
-                    break;
-                }
-                continue;
-            }
-            buf = match serve_node(&mut stream_write, file, buf, node)
-                .instrument(respond_span.exit())
-                .await
-            {
-                Ok(b) => b,
-                Err(_) => break,
-            };
-        }
-    }
-    .instrument(send_span);
+    let sender = run_sender(file, tree, requests_channel_out, stream_write).instrument(send_span);
 
     monoio::join!(receiver, sender);
     Ok(())
+}
+
+async fn run_sender(
+    file: &File,
+    tree: &FsTreeNode,
+    requests_channel: async_channel::Receiver<GetRequest>,
+    mut stream_write: monoio::io::OwnedWriteHalf<TcpStream>,
+) {
+    let mut buf = vec![0u8; 16 * 1024].into_boxed_slice();
+    loop {
+        let Ok(request) = requests_channel.recv().await else {
+            break;
+        };
+        let respond_span = tracing::info_span!("response", path = request.path).entered();
+        let Some(node) = tree.find(&request.path) else {
+            tracing::warn!(?request.path, "entry not found");
+            let (res, _) = stream_write
+                .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                .instrument(respond_span.exit())
+                .await;
+            if res.is_err() {
+                break;
+            }
+            continue;
+        };
+        if let Some(crc32) = request.if_none_match
+            && let Some(entry) = node.entry()
+            && entry.crc32 == crc32
+        {
+            tracing::debug!(?request.path, "etag matches");
+            const NOT_MODIFIED_TEMPLATE: &[u8] =
+                b"HTTP/1.1 304 Not Modified\r\nETag: \"xxxxxxxx\"\r\n\r\n";
+            const CRC_OFFSET: usize =
+                const { position(NOT_MODIFIED_TEMPLATE, b'x').expect("template sould have x") };
+
+            (buf[0..NOT_MODIFIED_TEMPLATE.len()]).copy_from_slice(NOT_MODIFIED_TEMPLATE);
+            let etag = &mut buf[CRC_OFFSET..{ CRC_OFFSET + size_of::<u32>() * 2 }];
+            const_hex::encode_to_slice(entry.crc32.to_le_bytes(), etag).unwrap();
+
+            let slice = IoBufMut::slice_mut(buf, 0..NOT_MODIFIED_TEMPLATE.len());
+            let (res, slice) = stream_write
+                .write_all(slice)
+                .instrument(respond_span.exit())
+                .await;
+            buf = slice.into_inner();
+
+            if res.is_err() {
+                break;
+            }
+            continue;
+        }
+        buf = match serve_node(&mut stream_write, file, buf, node)
+            .instrument(respond_span.exit())
+            .await
+        {
+            Ok(b) => b,
+            Err(_) => break,
+        };
+    }
+}
+
+async fn run_receiver(
+    requests_channel: async_channel::Sender<GetRequest>,
+    mut stream_read: OwnedReadHalf<TcpStream>,
+) {
+    let mut buf = vec![0u8; 1024].into_boxed_slice();
+    loop {
+        let request;
+        (request, buf) = parse_next_request(&mut stream_read, buf).await;
+        if let Some(request) = request {
+            requests_channel.send(request).await.unwrap();
+        };
+    }
 }
 
 struct GetRequest {
