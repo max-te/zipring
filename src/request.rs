@@ -5,13 +5,20 @@ use monoio::{
 
 use crate::Buf;
 
-pub struct GetRequest {
-    pub path: String,
-    pub if_none_match: Option<u32>,
+pub enum Request {
+    Get {
+        path: String,
+        if_none_match: Option<u32>,
+    },
+    Bad {
+        status: &'static str,
+    },
 }
 
+const BAD_REQUEST: &str = "400 Bad Request";
+
 pub async fn run_receiver(
-    requests_channel: async_channel::Sender<GetRequest>,
+    requests_channel: async_channel::Sender<Request>,
     mut stream_read: OwnedReadHalf<TcpStream>,
 ) -> std::io::Result<()> {
     let mut buf = vec![0u8; 1024].into_boxed_slice();
@@ -27,7 +34,7 @@ pub async fn run_receiver(
 async fn parse_next_request(
     stream: &mut OwnedReadHalf<TcpStream>,
     buf: Buf,
-) -> (Option<GetRequest>, Buf) {
+) -> (Option<Request>, Buf) {
     let (res, buf) = stream.read(buf).await;
     let Ok(len) = res else { return (None, buf) };
     if len == 0 {
@@ -40,7 +47,12 @@ async fn parse_next_request(
         return (None, buf);
     };
     if body_offset.is_partial() {
-        return (None, buf);
+        return (
+            Some(Request::Bad {
+                status: BAD_REQUEST,
+            }),
+            buf,
+        );
     }
 
     if req.method != Some("GET") {
@@ -70,7 +82,7 @@ async fn parse_next_request(
     tracing::debug!(?path, "GET request");
 
     (
-        Some(GetRequest {
+        Some(Request::Get {
             path,
             if_none_match,
         }),
