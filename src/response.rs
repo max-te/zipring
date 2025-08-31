@@ -105,57 +105,77 @@ async fn serve_node(
     }
 }
 
+struct ContentCompression {
+    extra_len: u64,
+    encoding: &'static str,
+}
+
 async fn serve_entry(
     stream: &mut OwnedWriteHalf<TcpStream>,
     file: &File,
     mut buf: Buf,
     entry: &Entry,
 ) -> Result<Buf, std::io::Error> {
+    let compression = match entry.method {
+        Method::Deflate => Some(ContentCompression {
+            encoding: "gzip",
+            extra_len: 18,
+        }),
+        Method::Zstd => Some(ContentCompression {
+            extra_len: 0,
+            encoding: "zstd",
+        }),
+        _ => None,
+    };
+
+    buf = send_header(stream, buf, entry, compression.as_ref()).await?;
+    buf = if compression.is_some() {
+        send_compressed_entry(stream, file, buf, entry).await?
+    } else {
+        send_decompressed_entry(stream, file, buf, entry).await?
+    };
+    tracing::debug!("finished serving entry");
+    Ok(buf)
+}
+
+async fn send_header(
+    stream: &mut OwnedWriteHalf<TcpStream>,
+    mut buf: Buf,
+    entry: &Entry,
+    compression: Option<&ContentCompression>,
+) -> Result<Buf, std::io::Error> {
+    // Prepare header in buffer
     let mime_type = mime_guess::from_path(&entry.name).first_or_text_plain();
     tracing::debug!(?mime_type);
-    let mut send_compressed = false;
-    let mut compression_header_size = 0;
-
-    // Assemble header
     let mut cur = Cursor::new(buf);
-    cur.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: ")?;
+    cur.write_all(b"HTTP/1.1 200 OK\r\n")?;
+
+    cur.write_all(b"Content-Type: ")?;
     cur.write_all(mime_type.essence_str().as_bytes())?;
     cur.write_all(b"\r\n")?;
 
-    tracing::debug!(?entry.method);
-    match entry.method {
-        Method::Deflate => {
-            cur.write_all(b"Content-Encoding: gzip\r\n")?;
-            send_compressed = true;
-            compression_header_size = 18;
-        }
-        Method::Zstd => {
-            cur.write_all(b"Content-Encoding: zstd\r\n")?;
-            send_compressed = true;
-        }
-        _ => (),
+    if let Some(ContentCompression { encoding, .. }) = compression {
+        cur.write_all(b"Content-Encoding: ")?;
+        cur.write_all(encoding.as_bytes())?;
+        cur.write_all(b"\r\n")?;
     }
 
     cur.write_all(b"Content-Length: ")?;
+    let content_length = match compression {
+        Some(ContentCompression { extra_len, .. }) => entry.compressed_size + extra_len,
+        None => entry.uncompressed_size,
+    };
     let mut intbuf = itoa::Buffer::new();
-    cur.write_all(
-        intbuf
-            .format(if send_compressed {
-                entry.compressed_size + compression_header_size
-            } else {
-                entry.uncompressed_size
-            })
-            .as_bytes(),
-    )?;
+    cur.write_all(intbuf.format(content_length).as_bytes())?;
 
     cur.write_all(b"\r\nETag: \"")?;
     let mut etag = [0u8; 8];
     const_hex::encode_to_slice(entry.crc32.to_le_bytes(), &mut etag)
         .expect("u32 should always be encodable to 8 hex chars");
     cur.write_all(&etag)?;
+    cur.write_all(b"\"\r\n")?;
 
-    cur.write_all(b"\"\r\nCache-control: max-age=180, public\r\n\r\n")?;
-
+    cur.write_all(b"Cache-control: max-age=180, public\r\n\r\n")?;
     // Send header
     let n = cur.position() as usize;
     buf = cur.into_inner();
@@ -164,15 +184,6 @@ async fn serve_entry(
     (res, slice) = stream.write_all(slice).await;
     buf = slice.into_inner();
     res?;
-
-    // Send body
-
-    buf = if send_compressed {
-        send_compressed_entry(stream, file, buf, entry).await?
-    } else {
-        send_decompressed_entry(stream, file, buf, entry).await?
-    };
-    tracing::debug!("finished serving entry");
     Ok(buf)
 }
 
