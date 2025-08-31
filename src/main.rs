@@ -87,7 +87,7 @@ async fn inner_main(threadid: usize, filepath: PathBuf) {
     }
 }
 
-async fn serve(stream: TcpStream, file: &File, tree: &FsTreeNode) -> std::io::Result<()> {
+async fn serve(stream: TcpStream, file: &File, tree: &FsTreeNode) {
     let (requests_channel_in, requests_channel_out) = async_channel::bounded(5);
     let (stream_read, stream_write) = stream.into_split();
 
@@ -97,6 +97,6 @@ async fn serve(stream: TcpStream, file: &File, tree: &FsTreeNode) -> std::io::Re
     let send_span = tracing::info_span!("sender");
     let sender = run_sender(file, tree, requests_channel_out, stream_write).instrument(send_span);
 
-    monoio::try_join!(receiver, sender)?;
-    Ok(())
+    let _ = monoio::join!(receiver, sender);
+    tracing::debug!("finished serving connection");
 }

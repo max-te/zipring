@@ -27,6 +27,10 @@ pub async fn run_receiver(
         (request, buf) = parse_next_request(&mut stream_read, buf).await;
         if let Some(request) = request {
             requests_channel.send(request).await.unwrap();
+        } else {
+            tracing::debug!("Stopped reading requests");
+            requests_channel.close();
+            break Ok(());
         };
     }
 }
@@ -38,15 +42,18 @@ async fn parse_next_request(
     let (res, buf) = stream.read(buf).await;
     let Ok(len) = res else { return (None, buf) };
     if len == 0 {
+        tracing::debug!("read 0 bytes");
         return (None, buf);
     }
 
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
     let Ok(body_offset) = req.parse(&buf) else {
+        tracing::debug!("could not parse request");
         return (None, buf);
     };
     if body_offset.is_partial() {
+        tracing::debug!("partial request");
         return (
             Some(Request::Bad {
                 status: BAD_REQUEST,
@@ -56,13 +63,15 @@ async fn parse_next_request(
     }
 
     if req.method != Some("GET") {
+        tracing::debug!("unsupported method");
         return (None, buf);
     }
 
-    let Some(path) = req.path else {
-        return (None, buf);
-    };
+    let path = req
+        .path
+        .expect("path should be set when parsing is complete");
     let Ok(path) = percent_encoding::percent_decode(path.as_bytes()).decode_utf8() else {
+        tracing::error!("path not decodable");
         return (None, buf);
     };
     let path = path.to_string();
