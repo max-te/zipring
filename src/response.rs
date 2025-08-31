@@ -1,5 +1,7 @@
 use crate::fstree;
+use crate::fstree::FsTreeNode;
 use crate::rc_zip_monoio::find_entry_compressed_data;
+use crate::request::GetRequest;
 use monoio::buf::IoBufMut;
 use monoio::fs::File;
 use monoio::io::AsyncWriteRentExt;
@@ -10,12 +12,47 @@ use rc_zip::parse::Entry;
 use rc_zip::parse::Method;
 use std::io::Cursor;
 use std::io::Write;
+use tracing::Instrument as _;
 
 use crate::Buf;
 
-pub(crate) async fn serve_not_found(
-    stream: &mut OwnedWriteHalf<TcpStream>,
-) -> Result<(), std::io::Error> {
+pub(crate) async fn run_sender(
+    file: &File,
+    tree: &FsTreeNode,
+    requests_channel: async_channel::Receiver<GetRequest>,
+    mut stream: monoio::io::OwnedWriteHalf<TcpStream>,
+) -> std::io::Result<()> {
+    let mut buf = vec![0u8; 16 * 1024].into_boxed_slice();
+    loop {
+        let request = requests_channel
+            .recv()
+            .await
+            .map_err(std::io::Error::other)?;
+        let respond_span = tracing::info_span!("response", path = request.path).entered();
+        let Some(node) = tree.find(&request.path) else {
+            tracing::warn!(?request.path, "entry not found");
+            serve_not_found(&mut stream)
+                .instrument(respond_span.exit())
+                .await?;
+            continue;
+        };
+        if let Some(crc32) = request.if_none_match
+            && let Some(entry) = node.entry()
+            && entry.crc32 == crc32
+        {
+            tracing::debug!(?request.path, "etag matches");
+            buf = serve_not_modified(&mut stream, buf, entry.crc32)
+                .instrument(respond_span.exit())
+                .await?;
+            continue;
+        }
+        buf = serve_node(&mut stream, file, buf, node)
+            .instrument(respond_span.exit())
+            .await?;
+    }
+}
+
+async fn serve_not_found(stream: &mut OwnedWriteHalf<TcpStream>) -> Result<(), std::io::Error> {
     let (res, _) = stream
         .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
         .await;
@@ -23,7 +60,7 @@ pub(crate) async fn serve_not_found(
     Ok(())
 }
 
-pub(crate) async fn serve_not_modified(
+async fn serve_not_modified(
     stream: &mut OwnedWriteHalf<TcpStream>,
     mut buf: Buf,
     crc32: u32,
@@ -54,7 +91,7 @@ const fn position(haystack: &[u8], needle: u8) -> Option<usize> {
     None
 }
 
-pub(crate) async fn serve_node(
+async fn serve_node(
     stream: &mut OwnedWriteHalf<TcpStream>,
     file: &File,
     buf: Buf,
@@ -68,7 +105,7 @@ pub(crate) async fn serve_node(
     }
 }
 
-pub(crate) async fn serve_entry(
+async fn serve_entry(
     stream: &mut OwnedWriteHalf<TcpStream>,
     file: &File,
     mut buf: Buf,
@@ -139,7 +176,7 @@ pub(crate) async fn serve_entry(
     Ok(buf)
 }
 
-pub(crate) async fn send_compressed_entry(
+async fn send_compressed_entry(
     stream: &mut OwnedWriteHalf<TcpStream>,
     file: &File,
     buf: Buf,
@@ -181,7 +218,7 @@ pub(crate) async fn send_compressed_entry(
     Ok(slice.into_inner())
 }
 
-pub(crate) async fn send_decompressed_entry(
+async fn send_decompressed_entry(
     stream: &mut OwnedWriteHalf<TcpStream>,
     file: &File,
     mut buf: Buf,
@@ -220,9 +257,9 @@ pub(crate) async fn send_decompressed_entry(
     }
 }
 
-pub(crate) static INDEX_PREAMBLE: &str = include_str!("index.html");
+static INDEX_PREAMBLE: &str = include_str!("index.html");
 
-pub(crate) async fn serve_index(
+async fn serve_index(
     is_root: bool,
     entries: &[fstree::FsTreeNode],
     stream: &mut OwnedWriteHalf<TcpStream>,

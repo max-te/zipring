@@ -1,5 +1,6 @@
 mod fstree;
 mod rc_zip_monoio;
+mod request;
 mod response;
 
 use std::num::NonZero;
@@ -7,12 +8,13 @@ use std::path::PathBuf;
 
 use monoio::IoUringDriver;
 use monoio::fs::File;
-use monoio::io::{AsyncReadRent, OwnedReadHalf, Splitable};
+use monoio::io::Splitable;
 use monoio::net::{TcpListener, TcpStream};
 use tracing::Instrument;
 
 use crate::fstree::FsTreeNode;
-use crate::response::{serve_node, serve_not_found, serve_not_modified};
+use crate::request::run_receiver;
+use crate::response::run_sender;
 
 type Buf = Box<[u8]>;
 
@@ -97,108 +99,4 @@ async fn serve(stream: TcpStream, file: &File, tree: &FsTreeNode) -> std::io::Re
 
     monoio::try_join!(receiver, sender)?;
     Ok(())
-}
-
-async fn run_sender(
-    file: &File,
-    tree: &FsTreeNode,
-    requests_channel: async_channel::Receiver<GetRequest>,
-    mut stream: monoio::io::OwnedWriteHalf<TcpStream>,
-) -> std::io::Result<()> {
-    let mut buf = vec![0u8; 16 * 1024].into_boxed_slice();
-    loop {
-        let request = requests_channel
-            .recv()
-            .await
-            .map_err(std::io::Error::other)?;
-        let respond_span = tracing::info_span!("response", path = request.path).entered();
-        let Some(node) = tree.find(&request.path) else {
-            tracing::warn!(?request.path, "entry not found");
-            serve_not_found(&mut stream)
-                .instrument(respond_span.exit())
-                .await?;
-            continue;
-        };
-        if let Some(crc32) = request.if_none_match
-            && let Some(entry) = node.entry()
-            && entry.crc32 == crc32
-        {
-            tracing::debug!(?request.path, "etag matches");
-            buf = serve_not_modified(&mut stream, buf, entry.crc32)
-                .instrument(respond_span.exit())
-                .await?;
-            continue;
-        }
-        buf = serve_node(&mut stream, file, buf, node)
-            .instrument(respond_span.exit())
-            .await?;
-    }
-}
-
-async fn run_receiver(
-    requests_channel: async_channel::Sender<GetRequest>,
-    mut stream_read: OwnedReadHalf<TcpStream>,
-) -> std::io::Result<()> {
-    let mut buf = vec![0u8; 1024].into_boxed_slice();
-    loop {
-        let request;
-        (request, buf) = parse_next_request(&mut stream_read, buf).await;
-        if let Some(request) = request {
-            requests_channel.send(request).await.unwrap();
-        };
-    }
-}
-
-struct GetRequest {
-    path: String,
-    if_none_match: Option<u32>,
-}
-
-async fn parse_next_request(
-    stream: &mut OwnedReadHalf<TcpStream>,
-    buf: Buf,
-) -> (Option<GetRequest>, Buf) {
-    let (res, buf) = stream.read(buf).await;
-    let Ok(len) = res else { return (None, buf) };
-    if len == 0 {
-        return (None, buf);
-    }
-
-    let mut headers = [httparse::EMPTY_HEADER; 64];
-    let mut req = httparse::Request::new(&mut headers);
-    let _body_offset = req.parse(&buf);
-
-    if req.method != Some("GET") {
-        return (None, buf);
-    }
-
-    let Some(path) = req.path else {
-        return (None, buf);
-    };
-    let Ok(path) = percent_encoding::percent_decode(path.as_bytes()).decode_utf8() else {
-        return (None, buf);
-    };
-    let path = path.to_string();
-
-    let mut if_none_match = None;
-    for h in headers {
-        if h.name == "If-None-Match" && h.value.len() == 10 {
-            let hex_part = &h.value[1..9];
-            if let Ok(crc32_bytes) = const_hex::decode_to_array::<&[u8], 4>(hex_part) {
-                let crc32 = u32::from_le_bytes(crc32_bytes);
-                if_none_match = Some(crc32);
-                break;
-            }
-        }
-    }
-
-    tracing::debug!(?path, "GET request");
-
-    (
-        Some(GetRequest {
-            path,
-            if_none_match,
-        }),
-        buf,
-    )
 }
