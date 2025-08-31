@@ -11,6 +11,49 @@ use rc_zip::parse::Method;
 use std::io::Cursor;
 use std::io::Write;
 
+type Buf = Box<[u8]>;
+
+pub(crate) async fn serve_not_found(
+    stream: &mut OwnedWriteHalf<TcpStream>,
+) -> Result<(), std::io::Error> {
+    let (res, _) = stream
+        .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+        .await;
+    res?;
+    Ok(())
+}
+
+pub(crate) async fn serve_not_modified(
+    stream: &mut OwnedWriteHalf<TcpStream>,
+    mut buf: Buf,
+    crc32: u32,
+) -> Result<Buf, std::io::Error> {
+    (buf[0..NOT_MODIFIED_TEMPLATE.len()]).copy_from_slice(NOT_MODIFIED_TEMPLATE);
+    let etag = &mut buf[CRC_OFFSET..{ CRC_OFFSET + size_of::<u32>() * 2 }];
+    const_hex::encode_to_slice(crc32.to_le_bytes(), etag).unwrap();
+
+    let slice = IoBufMut::slice_mut(buf, 0..NOT_MODIFIED_TEMPLATE.len());
+    let (res, slice) = stream.write_all(slice).await;
+    buf = slice.into_inner();
+    res?;
+    Ok(buf)
+}
+
+const NOT_MODIFIED_TEMPLATE: &[u8] = b"HTTP/1.1 304 Not Modified\r\nETag: \"xxxxxxxx\"\r\n\r\n";
+const CRC_OFFSET: usize =
+    const { position(NOT_MODIFIED_TEMPLATE, b'x').expect("template sould have x") };
+
+const fn position(haystack: &[u8], needle: u8) -> Option<usize> {
+    let mut idx = 0;
+    while idx < haystack.len() {
+        if haystack[idx] == needle {
+            return Some(idx);
+        }
+        idx += 1;
+    }
+    None
+}
+
 pub(crate) async fn serve_node(
     stream: &mut OwnedWriteHalf<TcpStream>,
     file: &File,

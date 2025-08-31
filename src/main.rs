@@ -6,14 +6,13 @@ use std::num::NonZero;
 use std::path::PathBuf;
 
 use monoio::IoUringDriver;
-use monoio::buf::IoBufMut;
 use monoio::fs::File;
-use monoio::io::{AsyncReadRent, AsyncWriteRentExt, OwnedReadHalf, Splitable};
+use monoio::io::{AsyncReadRent, OwnedReadHalf, Splitable};
 use monoio::net::{TcpListener, TcpStream};
 use tracing::Instrument;
 
 use crate::fstree::FsTreeNode;
-use crate::response::serve_node;
+use crate::response::{serve_node, serve_not_found, serve_not_modified};
 
 fn main() {
     tracing_subscriber::fmt::init();
@@ -94,7 +93,7 @@ async fn serve(stream: TcpStream, file: &File, tree: &FsTreeNode) -> std::io::Re
     let send_span = tracing::info_span!("sender");
     let sender = run_sender(file, tree, requests_channel_out, stream_write).instrument(send_span);
 
-    monoio::join!(receiver, sender);
+    monoio::try_join!(receiver, sender)?;
     Ok(())
 }
 
@@ -102,23 +101,20 @@ async fn run_sender(
     file: &File,
     tree: &FsTreeNode,
     requests_channel: async_channel::Receiver<GetRequest>,
-    mut stream_write: monoio::io::OwnedWriteHalf<TcpStream>,
-) {
+    mut stream: monoio::io::OwnedWriteHalf<TcpStream>,
+) -> std::io::Result<()> {
     let mut buf = vec![0u8; 16 * 1024].into_boxed_slice();
     loop {
-        let Ok(request) = requests_channel.recv().await else {
-            break;
-        };
+        let request = requests_channel
+            .recv()
+            .await
+            .map_err(std::io::Error::other)?;
         let respond_span = tracing::info_span!("response", path = request.path).entered();
         let Some(node) = tree.find(&request.path) else {
             tracing::warn!(?request.path, "entry not found");
-            let (res, _) = stream_write
-                .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+            serve_not_found(&mut stream)
                 .instrument(respond_span.exit())
-                .await;
-            if res.is_err() {
-                break;
-            }
+                .await?;
             continue;
         };
         if let Some(crc32) = request.if_none_match
@@ -126,41 +122,21 @@ async fn run_sender(
             && entry.crc32 == crc32
         {
             tracing::debug!(?request.path, "etag matches");
-            const NOT_MODIFIED_TEMPLATE: &[u8] =
-                b"HTTP/1.1 304 Not Modified\r\nETag: \"xxxxxxxx\"\r\n\r\n";
-            const CRC_OFFSET: usize =
-                const { position(NOT_MODIFIED_TEMPLATE, b'x').expect("template sould have x") };
-
-            (buf[0..NOT_MODIFIED_TEMPLATE.len()]).copy_from_slice(NOT_MODIFIED_TEMPLATE);
-            let etag = &mut buf[CRC_OFFSET..{ CRC_OFFSET + size_of::<u32>() * 2 }];
-            const_hex::encode_to_slice(entry.crc32.to_le_bytes(), etag).unwrap();
-
-            let slice = IoBufMut::slice_mut(buf, 0..NOT_MODIFIED_TEMPLATE.len());
-            let (res, slice) = stream_write
-                .write_all(slice)
+            buf = serve_not_modified(&mut stream, buf, entry.crc32)
                 .instrument(respond_span.exit())
-                .await;
-            buf = slice.into_inner();
-
-            if res.is_err() {
-                break;
-            }
+                .await?;
             continue;
         }
-        buf = match serve_node(&mut stream_write, file, buf, node)
+        buf = serve_node(&mut stream, file, buf, node)
             .instrument(respond_span.exit())
-            .await
-        {
-            Ok(b) => b,
-            Err(_) => break,
-        };
+            .await?;
     }
 }
 
 async fn run_receiver(
     requests_channel: async_channel::Sender<GetRequest>,
     mut stream_read: OwnedReadHalf<TcpStream>,
-) {
+) -> std::io::Result<()> {
     let mut buf = vec![0u8; 1024].into_boxed_slice();
     loop {
         let request;
@@ -223,15 +199,4 @@ async fn parse_next_request(
         }),
         buf,
     )
-}
-
-const fn position(haystack: &[u8], needle: u8) -> Option<usize> {
-    let mut idx = 0;
-    while idx < haystack.len() {
-        if haystack[idx] == needle {
-            return Some(idx);
-        }
-        idx += 1;
-    }
-    None
 }
