@@ -6,6 +6,7 @@
 //!   * [rc-zip-sync](https://crates.io/crates/rc-zip-sync) for using std I/O traits
 //!   * [rc-zip-tokio](https://crates.io/crates/rc-zip-tokio) for using tokio traits
 
+use crate::Buf;
 use monoio::{buf::IoBufMut, fs::File};
 use rc_zip::{
     error::Error,
@@ -46,8 +47,8 @@ pub async fn read_zip_from_file(file: &File) -> Result<Archive, Error> {
 pub async fn find_entry_compressed_data(
     file: &File,
     entry: &Entry,
-    buf: Option<Box<[u8]>>,
-) -> Result<(u64, Box<[u8]>), Error> {
+    buf: Option<Buf>,
+) -> Result<(u64, Buf), Error> {
     let mut buf = buf.unwrap_or_else(|| vec![0u8; 1024].into_boxed_slice());
     let offset = entry.header_offset;
     let (res, slice) = file

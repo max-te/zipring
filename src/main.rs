@@ -14,6 +14,8 @@ use tracing::Instrument;
 use crate::fstree::FsTreeNode;
 use crate::response::{serve_node, serve_not_found, serve_not_modified};
 
+type Buf = Box<[u8]>;
+
 fn main() {
     tracing_subscriber::fmt::init();
     let Some(file_arg) = std::env::args().nth(1) else {
@@ -154,8 +156,8 @@ struct GetRequest {
 
 async fn parse_next_request(
     stream: &mut OwnedReadHalf<TcpStream>,
-    buf: Box<[u8]>,
-) -> (Option<GetRequest>, Box<[u8]>) {
+    buf: Buf,
+) -> (Option<GetRequest>, Buf) {
     let (res, buf) = stream.read(buf).await;
     let Ok(len) = res else { return (None, buf) };
     if len == 0 {

@@ -11,7 +11,7 @@ use rc_zip::parse::Method;
 use std::io::Cursor;
 use std::io::Write;
 
-type Buf = Box<[u8]>;
+use crate::Buf;
 
 pub(crate) async fn serve_not_found(
     stream: &mut OwnedWriteHalf<TcpStream>,
@@ -57,9 +57,9 @@ const fn position(haystack: &[u8], needle: u8) -> Option<usize> {
 pub(crate) async fn serve_node(
     stream: &mut OwnedWriteHalf<TcpStream>,
     file: &File,
-    buf: Box<[u8]>,
+    buf: Buf,
     node: &fstree::FsTreeNode,
-) -> Result<Box<[u8]>, std::io::Error> {
+) -> Result<Buf, std::io::Error> {
     match node {
         fstree::FsTreeNode::Dir {
             is_root, children, ..
@@ -71,9 +71,9 @@ pub(crate) async fn serve_node(
 pub(crate) async fn serve_entry(
     stream: &mut OwnedWriteHalf<TcpStream>,
     file: &File,
-    mut buf: Box<[u8]>,
+    mut buf: Buf,
     entry: &Entry,
-) -> Result<Box<[u8]>, std::io::Error> {
+) -> Result<Buf, std::io::Error> {
     let mime_type = mime_guess::from_path(&entry.name).first_or_text_plain();
     tracing::debug!(?mime_type);
     let mut send_compressed = false;
@@ -142,9 +142,9 @@ pub(crate) async fn serve_entry(
 pub(crate) async fn send_compressed_entry(
     stream: &mut OwnedWriteHalf<TcpStream>,
     file: &File,
-    buf: Box<[u8]>,
+    buf: Buf,
     entry: &Entry,
-) -> Result<Box<[u8]>, std::io::Error> {
+) -> Result<Buf, std::io::Error> {
     let mut len = entry.compressed_size as usize;
     let mut gzip_trailer = [0u8; 8];
     if entry.method == Method::Deflate {
@@ -184,9 +184,9 @@ pub(crate) async fn send_compressed_entry(
 pub(crate) async fn send_decompressed_entry(
     stream: &mut OwnedWriteHalf<TcpStream>,
     file: &File,
-    mut buf: Box<[u8]>,
+    mut buf: Buf,
     entry: &Entry,
-) -> Result<Box<[u8]>, std::io::Error> {
+) -> Result<Buf, std::io::Error> {
     let mut res;
     let mut offset = entry.header_offset;
     let mut fsm = EntryFsm::new(None, None);
