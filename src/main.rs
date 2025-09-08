@@ -13,8 +13,8 @@ use monoio::net::{TcpListener, TcpStream};
 use tracing::Instrument;
 
 use crate::fstree::FsTreeNode;
-use crate::request::run_receiver;
-use crate::response::run_sender;
+use crate::request::parse_next_request;
+use crate::response::respond;
 
 type Buf = Box<[u8]>;
 
@@ -88,15 +88,19 @@ async fn inner_main(threadid: usize, filepath: PathBuf) {
 }
 
 async fn serve(stream: TcpStream, file: &File, tree: &FsTreeNode) {
-    let (requests_channel_in, requests_channel_out) = async_channel::bounded(5);
-    let (stream_read, stream_write) = stream.into_split();
+    let (mut stream_read, mut stream_write) = stream.into_split();
 
-    let recv_span = tracing::info_span!("receiver");
-    let receiver = run_receiver(requests_channel_in, stream_read).instrument(recv_span);
-
-    let send_span = tracing::info_span!("sender");
-    let sender = run_sender(file, tree, requests_channel_out, stream_write).instrument(send_span);
-
-    let _ = monoio::join!(receiver, sender);
+    let mut buf = vec![0u8; 1024].into_boxed_slice();
+    loop {
+        let request;
+        (request, buf) = parse_next_request(&mut stream_read, buf).await;
+        let Some(request) = request else {
+            break;
+        };
+        let Ok(_buf) = respond(request, file, tree, &mut stream_write, buf).await else {
+            break;
+        };
+        buf = _buf;
+    }
     tracing::debug!("finished serving connection");
 }

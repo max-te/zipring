@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-async-channel = "2.5.0"
 const-hex = "1.15.0"
 httparse = "1.10.1"
 itoa = "1.0.15"

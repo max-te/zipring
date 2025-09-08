@@ -16,49 +16,44 @@ use tracing::Instrument as _;
 
 use crate::Buf;
 
-pub(crate) async fn run_sender(
+pub async fn respond(
+    request: Request,
     file: &File,
     tree: &FsTreeNode,
-    requests_channel: async_channel::Receiver<Request>,
-    mut stream: monoio::io::OwnedWriteHalf<TcpStream>,
-) -> std::io::Result<()> {
-    let mut buf = vec![0u8; 16 * 1024].into_boxed_slice();
-    loop {
-        let request = requests_channel
-            .recv()
-            .await
-            .map_err(std::io::Error::other)?;
-        let respond_span = tracing::info_span!("response").entered();
-        match request {
-            Request::Get {
-                path,
-                if_none_match,
-            } => {
-                respond_span.record("path", &path);
-                let Some(node) = tree.find(&path) else {
-                    tracing::warn!(?path, "entry not found");
-                    serve_not_found(&mut stream)
-                        .instrument(respond_span.exit())
-                        .await?;
-                    continue;
-                };
-                if let Some(crc32) = if_none_match
-                    && let Some(entry) = node.entry()
-                    && entry.crc32 == crc32
-                {
-                    tracing::debug!("etag matches");
-                    buf = serve_not_modified(&mut stream, buf, entry.crc32)
-                        .instrument(respond_span.exit())
-                        .await?;
-                    continue;
-                }
-                buf = serve_node(&mut stream, file, buf, node)
+    stream: &mut monoio::io::OwnedWriteHalf<TcpStream>,
+    mut buf: Buf,
+) -> std::io::Result<Buf> {
+    let respond_span = tracing::info_span!("response").entered();
+    match request {
+        Request::Get {
+            path,
+            if_none_match,
+        } => {
+            respond_span.record("path", &path);
+            let Some(node) = tree.find(&path) else {
+                tracing::warn!(?path, "entry not found");
+                serve_not_found(stream)
                     .instrument(respond_span.exit())
                     .await?;
+                return Ok(buf);
+            };
+            if let Some(crc32) = if_none_match
+                && let Some(entry) = node.entry()
+                && entry.crc32 == crc32
+            {
+                tracing::debug!("etag matches");
+                buf = serve_not_modified(stream, buf, entry.crc32)
+                    .instrument(respond_span.exit())
+                    .await?;
+                return Ok(buf);
             }
-            Request::Bad { status } => serve_bad_request(&mut stream, status).await?,
+            buf = serve_node(stream, file, buf, node)
+                .instrument(respond_span.exit())
+                .await?;
         }
-    }
+        Request::Bad { status } => serve_bad_request(stream, status).await?,
+    };
+    Ok(buf)
 }
 
 async fn serve_bad_request(

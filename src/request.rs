@@ -20,25 +20,7 @@ const URI_TOO_LONG: &str = "414 URI Too Long";
 const HEADER_TOO_LONG: &str = "431 Request Header Fields Too Large";
 const METHOD_NOT_ALLOWED: &str = "405 Method Not Allowed";
 
-pub async fn run_receiver(
-    requests_channel: async_channel::Sender<Request>,
-    mut stream_read: OwnedReadHalf<TcpStream>,
-) -> std::io::Result<()> {
-    let mut buf = vec![0u8; 1024].into_boxed_slice();
-    loop {
-        let request;
-        (request, buf) = parse_next_request(&mut stream_read, buf).await;
-        if let Some(request) = request {
-            requests_channel.send(request).await.unwrap();
-        } else {
-            tracing::debug!("Stopped reading requests");
-            requests_channel.close();
-            break Ok(());
-        };
-    }
-}
-
-async fn parse_next_request(
+pub async fn parse_next_request(
     stream: &mut OwnedReadHalf<TcpStream>,
     buf: Buf,
 ) -> (Option<Request>, Buf) {
