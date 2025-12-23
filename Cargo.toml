@@ -15,3 +15,10 @@ rc-zip = { version = "5.3.1", features = ["deflate"] }
 tracing = { version = "0.1.41", features = ["release_max_level_info"] }
 tracing-subscriber = { version = "0.3.19", features = ["std", "fmt", "ansi"], default-features = false }
 winnow = "0.5.36"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "http_server"
+harness = false
