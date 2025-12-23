@@ -6,6 +6,7 @@ pub(crate) enum FsTreeNode {
         children: Vec<FsTreeNode>,
         entry: Option<Entry>,
         is_root: bool,
+        index_html_index: Option<usize>,
     },
     File {
         name: String,
@@ -24,7 +25,12 @@ impl std::fmt::Debug for FsTreeNode {
 
 impl FsTreeNode {
     pub(crate) fn insert_at(&mut self, entry: Entry, path: String) {
-        let FsTreeNode::Dir { children, .. } = self else {
+        let FsTreeNode::Dir {
+            children,
+            index_html_index,
+            ..
+        } = self
+        else {
             panic!("Cannot insert into FsTreeNode::File")
         };
 
@@ -45,6 +51,7 @@ impl FsTreeNode {
                         children: vec![],
                         entry: None,
                         is_root: false,
+                        index_html_index: None,
                     };
                     children.push(new_child);
                     children.last_mut().unwrap()
@@ -72,6 +79,9 @@ impl FsTreeNode {
                 name: path.to_owned(),
                 entry,
             };
+            if path == "index.html" {
+                *index_html_index = Some(children.len());
+            }
             children.push(new_child);
         }
     }
@@ -87,6 +97,7 @@ impl FsTreeNode {
             children: Vec::new(),
             entry: None,
             is_root: true,
+            index_html_index: None,
         }
     }
 
@@ -127,9 +138,17 @@ impl FsTreeNode {
     }
 
     pub(crate) fn recursive_sort(&mut self) {
-        if let FsTreeNode::Dir { children, .. } = self {
+        if let FsTreeNode::Dir {
+            children,
+            index_html_index,
+            ..
+        } = self
+        {
             children.sort_by(|a, b| PartialOrd::partial_cmp(&a.name(), &b.name()).unwrap());
             children.iter_mut().for_each(FsTreeNode::recursive_sort);
+            if index_html_index.is_some() {
+                *index_html_index = children.iter().position(|c| c.name() == "index.html");
+            }
         }
     }
 }

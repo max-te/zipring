@@ -113,8 +113,19 @@ async fn serve_node(
 ) -> Result<Buf, std::io::Error> {
     match node {
         fstree::FsTreeNode::Dir {
-            is_root, children, ..
-        } => serve_index(*is_root, children, stream).await.map(|_| buf),
+            name: _,
+            entry: _,
+            is_root,
+            children,
+            index_html_index,
+        } => {
+            if let Some(idx) = index_html_index {
+                if let fstree::FsTreeNode::File { entry, .. } = &children[*idx] {
+                    return serve_entry(stream, file, buf, entry).await;
+                }
+            }
+            serve_index(*is_root, children, stream).await.map(|_| buf)
+        }
         fstree::FsTreeNode::File { entry, .. } => serve_entry(stream, file, buf, entry).await,
     }
 }
