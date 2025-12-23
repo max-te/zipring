@@ -26,6 +26,11 @@ fn main() {
     };
 
     let filepath = PathBuf::from(file_arg);
+    let port = std::env::var("PORT")
+        .unwrap_or_else(|_| "50002".to_string())
+        .parse::<u16>()
+        .unwrap_or(50002);
+    
     let n_threads = std::thread::available_parallelism()
         .map(NonZero::get)
         .unwrap_or(4);
@@ -38,7 +43,7 @@ fn main() {
                     .enable_all()
                     .build()
                     .unwrap();
-                rt.block_on(inner_main(i, path))
+                rt.block_on(inner_main(i, path, port))
             })
         })
         .collect();
@@ -48,7 +53,7 @@ fn main() {
     }
 }
 
-async fn inner_main(threadid: usize, filepath: PathBuf) {
+async fn inner_main(threadid: usize, filepath: PathBuf, port: u16) {
     let file = monoio::fs::File::open(&filepath).await.unwrap();
     let file: &'static File = Box::leak(Box::new(file));
     let zip = rc_zip_monoio::read_zip_from_file(file).await.unwrap();
@@ -60,7 +65,8 @@ async fn inner_main(threadid: usize, filepath: PathBuf) {
     tree.recursive_sort();
     let tree: &'static FsTreeNode = Box::leak(Box::new(tree));
 
-    let listener = TcpListener::bind("127.0.0.1:50002").unwrap();
+    let addr = format!("127.0.0.1:{}", port);
+    let listener = TcpListener::bind(&addr).unwrap();
     if threadid == 0 {
         tracing::info!(
             "Serving {} at http://{}",
