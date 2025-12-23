@@ -21,9 +21,16 @@ fn stop_server(mut child: Child) {
     let _ = child.wait();
 }
 
-fn make_request(path: &str, stream: &mut TcpStream) -> Result<Vec<u8>, std::io::Error> {
+fn make_request(
+    path: &str,
+    stream: &mut TcpStream,
+    encoding: &str,
+) -> Result<Vec<u8>, std::io::Error> {
     stream.set_nodelay(true)?;
-    let request = format!("GET {} HTTP/1.1\r\nHost: localhost\r\n\r\n", path);
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: {}\r\n\r\n",
+        path, encoding
+    );
     stream.write_all(request.as_bytes())?;
 
     let mut reader = BufReader::new(stream);
@@ -75,31 +82,54 @@ fn criterion_benchmark(c: &mut criterion::Criterion) {
 
         let mut stream = TcpStream::connect(SERVER_ADDR).unwrap();
         b.iter(|| {
-            make_request("/images", &mut stream).unwrap();
+            make_request("/images", &mut stream, "identity").unwrap();
         });
 
         stop_server(server);
     });
 
-    group.bench_function("request_file", |b| {
+    group.bench_function("request_file_deflate", |b| {
         let server = start_server(zip_path.clone());
         wait_for_server();
 
         let mut stream = TcpStream::connect(SERVER_ADDR).unwrap();
         b.iter(|| {
-            make_request("/index.html", &mut stream).unwrap();
+            make_request("/index.html", &mut stream, "deflate").unwrap();
         });
 
         stop_server(server);
     });
 
+    group.bench_function("request_file_identity", |b| {
+        let server = start_server(zip_path.clone());
+        wait_for_server();
+
+        let mut stream = TcpStream::connect(SERVER_ADDR).unwrap();
+        b.iter(|| {
+            make_request("/index.html", &mut stream, "identity").unwrap();
+        });
+
+        stop_server(server);
+    });
+
+    group.bench_function("request_file_gzip", |b| {
+        let server = start_server(zip_path.clone());
+        wait_for_server();
+
+        let mut stream = TcpStream::connect(SERVER_ADDR).unwrap();
+        b.iter(|| {
+            make_request("/index.html", &mut stream, "gzip").unwrap();
+        });
+
+        stop_server(server);
+    });
     group.bench_function("request_small_file", |b| {
         let server = start_server(zip_path.clone());
         wait_for_server();
 
         let mut stream = TcpStream::connect(SERVER_ADDR).unwrap();
         b.iter(|| {
-            make_request("/metadata.opf", &mut stream).unwrap();
+            make_request("/metadata.opf", &mut stream, "deflate").unwrap();
         });
 
         stop_server(server);
@@ -111,7 +141,7 @@ fn criterion_benchmark(c: &mut criterion::Criterion) {
 
         b.iter(|| {
             let mut stream = TcpStream::connect(SERVER_ADDR).unwrap();
-            make_request("/metadata.opf", &mut stream).unwrap();
+            make_request("/metadata.opf", &mut stream, "deflate").unwrap();
         });
 
         stop_server(server);
