@@ -1,6 +1,7 @@
 use crate::fstree;
 use crate::fstree::FsTreeNode;
 use crate::rc_zip_monoio::find_entry_compressed_data;
+use crate::request::AcceptedEncodings;
 use crate::request::Request;
 use monoio::buf::IoBufMut;
 use monoio::fs::File;
@@ -28,6 +29,7 @@ pub async fn respond(
         Request::Get {
             path,
             if_none_match,
+            accepted_encodings,
         } => {
             respond_span.record("path", &path);
             let Some(node) = tree.find(&path) else {
@@ -47,7 +49,7 @@ pub async fn respond(
                     .await?;
                 return Ok(buf);
             }
-            buf = serve_node(stream, file, buf, node)
+            buf = serve_node(stream, file, buf, node, accepted_encodings)
                 .instrument(respond_span.exit())
                 .await?;
         }
@@ -110,6 +112,7 @@ async fn serve_node(
     file: &File,
     buf: Buf,
     node: &fstree::FsTreeNode,
+    accepted_encodings: AcceptedEncodings,
 ) -> Result<Buf, std::io::Error> {
     match node {
         fstree::FsTreeNode::Dir {
@@ -121,12 +124,14 @@ async fn serve_node(
         } => {
             if let Some(idx) = index_html_index {
                 if let fstree::FsTreeNode::File { entry, .. } = &children[*idx] {
-                    return serve_entry(stream, file, buf, entry).await;
+                    return serve_entry(stream, file, buf, entry, accepted_encodings).await;
                 }
             }
             serve_index(*is_root, children, stream).await.map(|_| buf)
         }
-        fstree::FsTreeNode::File { entry, .. } => serve_entry(stream, file, buf, entry).await,
+        fstree::FsTreeNode::File { entry, .. } => {
+            serve_entry(stream, file, buf, entry, accepted_encodings).await
+        }
     }
 }
 
@@ -140,15 +145,16 @@ async fn serve_entry(
     file: &File,
     mut buf: Buf,
     entry: &Entry,
+    accepted_encodings: AcceptedEncodings,
 ) -> Result<Buf, std::io::Error> {
     let compression = match entry.method {
-        Method::Deflate => Some(ContentCompression {
+        Method::Deflate if accepted_encodings.gzip => Some(ContentCompression {
             encoding: "gzip",
             extra_len: 18,
         }),
-        Method::Zstd => Some(ContentCompression {
-            extra_len: 0,
+        Method::Zstd if accepted_encodings.zstd => Some(ContentCompression {
             encoding: "zstd",
+            extra_len: 0,
         }),
         _ => None,
     };
@@ -247,11 +253,15 @@ async fn send_compressed_entry(
         buf = slice.into_inner();
     }
 
-    (buf[..8]).copy_from_slice(&gzip_trailer);
-    let slice = IoBufMut::slice_mut(buf, ..8);
-    let (res, slice) = stream.write_all(slice).await;
-    res?;
-    Ok(slice.into_inner())
+    if entry.method == Method::Deflate {
+        (buf[..8]).copy_from_slice(&gzip_trailer);
+        let slice = IoBufMut::slice_mut(buf, ..8);
+        let (res, slice) = stream.write_all(slice).await;
+        res?;
+        buf = slice.into_inner();
+    }
+
+    Ok(buf)
 }
 
 async fn send_decompressed_entry(

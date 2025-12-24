@@ -5,10 +5,27 @@ use monoio::{
 
 use crate::Buf;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AcceptedEncodings {
+    pub gzip: bool,
+    pub zstd: bool,
+}
+
+impl AcceptedEncodings {
+    pub fn from_header(header: &httparse::Header) -> Self {
+        let value = std::str::from_utf8(header.value).unwrap_or_default();
+        let gzip = value.contains("gzip");
+        let zstd = value.contains("zstd");
+
+        Self { gzip, zstd }
+    }
+}
+
 pub enum Request {
     Get {
         path: String,
         if_none_match: Option<u32>,
+        accepted_encodings: AcceptedEncodings,
     },
     Bad {
         status: &'static str,
@@ -91,6 +108,7 @@ pub async fn parse_next_request(
     let path = path.to_string();
 
     let mut if_none_match = None;
+    let mut accepted_encodings = AcceptedEncodings::default();
     for h in headers {
         if h.name == "If-None-Match" && h.value.len() == 10 {
             let hex_part = &h.value[1..9];
@@ -100,6 +118,9 @@ pub async fn parse_next_request(
                 break;
             }
         }
+        if h.name == "Accept-Encoding" {
+            accepted_encodings = AcceptedEncodings::from_header(&h);
+        }
     }
 
     tracing::debug!(?path, "GET request");
@@ -108,6 +129,7 @@ pub async fn parse_next_request(
         Some(Request::Get {
             path,
             if_none_match,
+            accepted_encodings,
         }),
         buf,
     )
