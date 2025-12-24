@@ -3,6 +3,7 @@ use crate::fstree::FsTreeNode;
 use crate::rc_zip_monoio::find_entry_compressed_data;
 use crate::request::AcceptedEncodings;
 use crate::request::Request;
+use const_format::formatcp;
 use monoio::buf::IoBufMut;
 use monoio::fs::File;
 use monoio::io::AsyncWriteRentExt;
@@ -72,6 +73,21 @@ async fn serve_not_found(stream: &mut OwnedWriteHalf<TcpStream>) -> Result<(), s
     let (res, _) = stream
         .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
         .await;
+    res?;
+    Ok(())
+}
+
+async fn serve_not_implemented(
+    stream: &mut OwnedWriteHalf<TcpStream>,
+) -> Result<(), std::io::Error> {
+    const MSG: &str = "This file content uses an unsupported compression method.";
+    const RESPONSE: &str = formatcp!(
+        "HTTP/1.1 500 Unsupported Compression\r\nContent-Length: {}\r\n\r\n{}",
+        MSG.as_bytes().len(),
+        MSG
+    );
+
+    let (res, _) = stream.write_all(RESPONSE).await;
     res?;
     Ok(())
 }
@@ -159,11 +175,17 @@ async fn serve_entry(
         _ => None,
     };
 
-    buf = send_header(stream, buf, entry, compression.as_ref()).await?;
-    buf = if compression.is_some() {
-        send_compressed_entry(stream, file, buf, entry).await?
+    if compression.is_some() {
+        buf = send_header(stream, buf, entry, compression.as_ref()).await?;
+        buf = send_compressed_entry(stream, file, buf, entry).await?
     } else {
-        send_decompressed_entry(stream, file, buf, entry).await?
+        if is_method_supported(entry.method) {
+            buf = send_header(stream, buf, entry, compression.as_ref()).await?;
+            buf = send_decompressed_entry(stream, file, buf, entry).await?
+        } else {
+            tracing::error!("Unsupported compression method {:?}", entry.method);
+            serve_not_implemented(stream).await?;
+        }
     };
     tracing::debug!("finished serving entry");
     Ok(buf)
@@ -300,6 +322,23 @@ async fn send_decompressed_entry(
                 return Err(std::io::Error::other(err));
             }
         }
+    }
+}
+
+fn is_method_supported(method: Method) -> bool {
+    match method {
+        Method::Store => true,
+        #[cfg(feature = "deflate")]
+        Method::Deflate => true,
+        #[cfg(feature = "zstd")]
+        Method::Zstd => true,
+        #[cfg(feature = "deflate64")]
+        Method::Deflate64 => true,
+        #[cfg(feature = "bzip2")]
+        Method::Bzip2 => true,
+        #[cfg(feature = "lzma")]
+        Method::Lzma => true,
+        _ => false,
     }
 }
 

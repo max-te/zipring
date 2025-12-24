@@ -6,6 +6,7 @@ license = "MIT"
 
 [dependencies]
 const-hex = "1.15.0"
+const_format = "0.2.35"
 httparse = "1.10.1"
 itoa = "1.0.15"
 mime_guess = { version = "2.0.5", default-features = false }
@@ -15,6 +16,14 @@ rc-zip = { version = "5.3.1", features = ["deflate"] }
 tracing = { version = "0.1.41", features = ["release_max_level_info"] }
 tracing-subscriber = { version = "0.3.19", features = ["std", "fmt", "ansi"], default-features = false }
 winnow = "0.5.36"
+
+[features]
+default = ["deflate"]
+deflate = ["rc-zip/deflate"]
+zstd = ["rc-zip/zstd"]
+deflate64 = ["rc-zip/deflate64"]
+bzip2 = ["rc-zip/bzip2"]
+lzma = ["rc-zip/lzma"]
 
 [dev-dependencies]
 criterion = "0.5"
