@@ -26,6 +26,7 @@ pub enum Request {
         path: String,
         if_none_match: Option<u32>,
         accepted_encodings: AcceptedEncodings,
+        close: bool,
     },
     Bad {
         status: &'static str,
@@ -109,6 +110,7 @@ pub async fn parse_next_request(
 
     let mut if_none_match = None;
     let mut accepted_encodings = AcceptedEncodings::default();
+    let mut close = false;
     for h in headers {
         if h.name.eq_ignore_ascii_case("if-none-match") && h.value.len() == 10 {
             let hex_part = &h.value[1..9];
@@ -121,6 +123,9 @@ pub async fn parse_next_request(
         if h.name.eq_ignore_ascii_case("accept-encoding") {
             accepted_encodings = AcceptedEncodings::from_header(&h);
         }
+        if h.name.eq_ignore_ascii_case("connection") && h.value.eq_ignore_ascii_case(b"close") {
+            close = true;
+        }
     }
 
     tracing::debug!(?path, "GET request");
@@ -130,6 +135,7 @@ pub async fn parse_next_request(
             path,
             if_none_match,
             accepted_encodings,
+            close,
         }),
         buf,
     )

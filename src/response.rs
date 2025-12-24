@@ -31,6 +31,7 @@ pub async fn respond(
             path,
             if_none_match,
             accepted_encodings,
+            close: _,
         } => {
             respond_span.record("path", &path);
             let Some(node) = tree.find(&path) else {

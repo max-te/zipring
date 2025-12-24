@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use monoio::IoUringDriver;
 use monoio::fs::File;
-use monoio::io::Splitable;
+use monoio::io::{AsyncWriteRent, Splitable};
 use monoio::net::{TcpListener, TcpStream};
 use tracing::Instrument;
 
@@ -30,7 +30,7 @@ fn main() {
         .unwrap_or_else(|_| "50002".to_string())
         .parse::<u16>()
         .unwrap_or(50002);
-    
+
     let n_threads = std::thread::available_parallelism()
         .map(NonZero::get)
         .unwrap_or(4);
@@ -103,10 +103,25 @@ async fn serve(stream: TcpStream, file: &File, tree: &FsTreeNode) {
         let Some(request) = request else {
             break;
         };
+        let close = match request {
+            crate::request::Request::Get { close, .. } => close,
+            _ => false,
+        };
         let Ok(_buf) = respond(request, file, tree, &mut stream_write, buf).await else {
             break;
         };
         buf = _buf;
+        if close {
+            tracing::info!("closing connection on request");
+            break;
+        }
     }
-    tracing::debug!("finished serving connection");
+    if let Ok(mut stream) = stream_read.reunite(stream_write) {
+        if let Err(e) = stream.shutdown().await {
+            tracing::error!("shutdown failed: {:?}", e);
+        };
+    } else {
+        tracing::error!("reunite failed");
+    };
+    tracing::info!("finished serving connection");
 }

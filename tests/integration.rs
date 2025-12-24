@@ -60,13 +60,13 @@ impl Drop for ServerHandle {
     }
 }
 
-fn start_server(zip_path: PathBuf) -> ServerHandle {
+fn start_server(zip_path: impl Into<PathBuf>) -> ServerHandle {
     let port = find_free_port();
     let exe = env!("CARGO_BIN_EXE_zipring");
     let server = ServerHandle {
         process: ManuallyDrop::new(
             std::process::Command::new(exe)
-                .arg(zip_path)
+                .arg(zip_path.into())
                 .env("PORT", port.to_string())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -405,8 +405,7 @@ fn test_content_encoding_decompressed() {
 
 #[test]
 fn test_content_length_vs_compressed_size() {
-    let zip_path = PathBuf::from(TEST_FILE);
-    let server = start_server(zip_path);
+    let server = start_server(TEST_FILE);
 
     // When serving compressed content, Content-Length should match the compressed size
     let (headers, body) = make_request(&server, "/index.html", "gzip").expect("Request failed");
@@ -425,4 +424,21 @@ fn test_content_length_vs_compressed_size() {
         content_length,
         "Received body size should match Content-Length header"
     );
+}
+
+#[test]
+fn test_connection_close() {
+    let server = start_server(TEST_FILE);
+    let mut stream = TcpStream::connect(server.socket_address()).expect("Connection failed");
+    stream.set_nodelay(true).unwrap();
+    let request = format!("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",);
+    stream.write_all(request.as_bytes()).unwrap();
+
+    let mut reader = BufReader::new(&stream);
+    let mut body = Vec::new();
+    reader.read_to_end(&mut body).unwrap();
+    assert!(!body.is_empty(), "body should not be empty");
+    let mut buf = Vec::new();
+    // Zero-sized read indicates EOF
+    assert_eq!(stream.read_to_end(&mut buf).unwrap(), 0);
 }
