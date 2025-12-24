@@ -110,7 +110,7 @@ pub async fn parse_next_request(
     let mut if_none_match = None;
     let mut accepted_encodings = AcceptedEncodings::default();
     for h in headers {
-        if h.name == "If-None-Match" && h.value.len() == 10 {
+        if h.name.eq_ignore_ascii_case("if-none-match") && h.value.len() == 10 {
             let hex_part = &h.value[1..9];
             if let Ok(crc32_bytes) = const_hex::decode_to_array::<&[u8], 4>(hex_part) {
                 let crc32 = u32::from_le_bytes(crc32_bytes);
@@ -118,7 +118,7 @@ pub async fn parse_next_request(
                 break;
             }
         }
-        if h.name == "Accept-Encoding" {
+        if h.name.eq_ignore_ascii_case("accept-encoding") {
             accepted_encodings = AcceptedEncodings::from_header(&h);
         }
     }
