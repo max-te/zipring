@@ -27,7 +27,7 @@ lzma = ["rc-zip/lzma"]
 
 [dev-dependencies]
 criterion = "0.5"
-assert_cmd = "2.0"
+assert_cmd = "2.1"
 regex = "1.11"
 flate2 = "1.1.8"
 ureq = { version = "3.1.4", features = ["gzip"] }
