@@ -15,7 +15,7 @@ percent-encoding = "2.3.1"
 rc-zip = { version = "5.3.1", features = ["deflate"] }
 tracing = { version = "0.1.44", features = ["release_max_level_info"] }
 tracing-subscriber = { version = "0.3.19", features = ["std", "fmt", "ansi"], default-features = false }
-winnow = "0.5.36"
+winnow = "0.7.13"
 
 [features]
 default = ["deflate"]

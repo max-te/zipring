@@ -1692,7 +1692,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq",
- "winnow 0.5.40",
+ "winnow 0.7.13",
 ]
 
 [[package]]
