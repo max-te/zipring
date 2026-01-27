@@ -14,7 +14,7 @@ monoio = { version = "0.2.4", features = ["iouring", "tracing"], default-feature
 percent-encoding = "2.3.1"
 rc-zip = { version = "5.4.1", features = ["deflate"] }
 tracing = { version = "0.1.44", features = ["release_max_level_info"] }
-tracing-subscriber = { version = "0.3.19", features = ["std", "fmt", "ansi"], default-features = false }
+tracing-subscriber = { version = "0.3.22", features = ["std", "fmt", "ansi"], default-features = false }
 winnow = "0.5.36"
 
 [features]
