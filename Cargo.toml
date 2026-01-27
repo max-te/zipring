@@ -8,7 +8,7 @@ license = "MIT"
 const-hex = "1.17.0"
 const_format = "0.2.35"
 httparse = "1.10.1"
-itoa = "1.0.15"
+itoa = "1.0.17"
 mime_guess = { version = "2.0.5", default-features = false }
 monoio = { version = "0.2.4", features = ["iouring", "tracing"], default-features = false }
 percent-encoding = "2.3.1"
