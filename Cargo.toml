@@ -26,7 +26,7 @@ bzip2 = ["rc-zip/bzip2"]
 lzma = ["rc-zip/lzma"]
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
 assert_cmd = "2.0"
 regex = "1.11"
 flate2 = "1.1.8"
