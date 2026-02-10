@@ -30,7 +30,7 @@ criterion = "0.5"
 assert_cmd = "2.0"
 regex = "1.11"
 flate2 = "1.1.8"
-ureq = { version = "3.1.4", features = ["gzip"] }
+ureq = { version = "3.2.0", features = ["gzip"] }
 
 [[bench]]
 name = "http_server"
