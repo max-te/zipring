@@ -29,7 +29,7 @@ lzma = ["rc-zip/lzma"]
 criterion = "0.5"
 assert_cmd = "2.0"
 regex = "1.11"
-flate2 = "1.1.8"
+flate2 = "1.1.9"
 ureq = { version = "3.1.4", features = ["gzip"] }
 
 [[bench]]
