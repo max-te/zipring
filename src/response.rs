@@ -23,7 +23,7 @@ pub async fn respond(
     file: &File,
     tree: &FsTreeNode,
     stream: &mut monoio::io::OwnedWriteHalf<TcpStream>,
-    mut buf: Buf,
+    buf: Buf,
 ) -> std::io::Result<Buf> {
     let respond_span = tracing::info_span!("response").entered();
     match request {
@@ -36,28 +36,27 @@ pub async fn respond(
             respond_span.record("path", &path);
             let Some(node) = tree.find(&path) else {
                 tracing::warn!(?path, "entry not found");
-                serve_not_found(stream)
+                return serve_not_found(stream)
                     .instrument(respond_span.exit())
-                    .await?;
-                return Ok(buf);
+                    .await
+                    .map(|_| buf);
             };
             if let Some(crc32) = if_none_match
                 && let Some(entry) = node.entry()
                 && entry.crc32 == crc32
             {
                 tracing::debug!("etag matches");
-                buf = serve_not_modified(stream, buf, entry.crc32)
+                serve_not_modified(stream, buf, entry.crc32)
                     .instrument(respond_span.exit())
-                    .await?;
-                return Ok(buf);
+                    .await
+            } else {
+                serve_node(stream, file, buf, node, accepted_encodings)
+                    .instrument(respond_span.exit())
+                    .await
             }
-            buf = serve_node(stream, file, buf, node, accepted_encodings)
-                .instrument(respond_span.exit())
-                .await?;
         }
-        Request::Bad { status } => serve_bad_request(stream, status).await?,
-    };
-    Ok(buf)
+        Request::Bad { status } => serve_bad_request(stream, status).await.map(|_| buf),
+    }
 }
 
 async fn serve_bad_request(
@@ -71,11 +70,11 @@ async fn serve_bad_request(
 }
 
 async fn serve_not_found(stream: &mut OwnedWriteHalf<TcpStream>) -> Result<(), std::io::Error> {
-    let (res, _) = stream
+    stream
         .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
-        .await;
-    res?;
-    Ok(())
+        .await
+        .0
+        .map(|_| ())
 }
 
 async fn serve_not_implemented(
@@ -88,9 +87,7 @@ async fn serve_not_implemented(
         MSG
     );
 
-    let (res, _) = stream.write_all(RESPONSE).await;
-    res?;
-    Ok(())
+    stream.write_all(RESPONSE).await.0.map(|_| ())
 }
 
 async fn serve_not_modified(
@@ -98,6 +95,9 @@ async fn serve_not_modified(
     mut buf: Buf,
     crc32: u32,
 ) -> Result<Buf, std::io::Error> {
+    const NOT_MODIFIED_TEMPLATE: &[u8] = b"HTTP/1.1 304 Not Modified\r\nETag: \"xxxxxxxx\"\r\n\r\n";
+    const CRC_OFFSET: usize = position(NOT_MODIFIED_TEMPLATE, b'x').expect("template sould have x");
+
     (buf[0..NOT_MODIFIED_TEMPLATE.len()]).copy_from_slice(NOT_MODIFIED_TEMPLATE);
     let etag = &mut buf[CRC_OFFSET..{ CRC_OFFSET + size_of::<u32>() * 2 }];
     const_hex::encode_to_slice(crc32.to_le_bytes(), etag).unwrap();
@@ -108,10 +108,6 @@ async fn serve_not_modified(
     res?;
     Ok(buf)
 }
-
-const NOT_MODIFIED_TEMPLATE: &[u8] = b"HTTP/1.1 304 Not Modified\r\nETag: \"xxxxxxxx\"\r\n\r\n";
-const CRC_OFFSET: usize =
-    const { position(NOT_MODIFIED_TEMPLATE, b'x').expect("template sould have x") };
 
 const fn position(haystack: &[u8], needle: u8) -> Option<usize> {
     let mut idx = 0;
@@ -142,9 +138,10 @@ async fn serve_node(
             if let Some(idx) = index_html_index
                 && let fstree::FsTreeNode::File { entry, .. } = &children[*idx]
             {
-                return serve_entry(stream, file, buf, entry, accepted_encodings).await;
+                serve_entry(stream, file, buf, entry, accepted_encodings).await
+            } else {
+                serve_index(*is_root, children, stream).await.map(|_| buf)
             }
-            serve_index(*is_root, children, stream).await.map(|_| buf)
         }
         fstree::FsTreeNode::File { entry, .. } => {
             serve_entry(stream, file, buf, entry, accepted_encodings).await
@@ -157,6 +154,7 @@ struct ContentCompression {
     encoding: &'static str,
 }
 
+#[tracing::instrument(skip_all, level = "debug")]
 async fn serve_entry(
     stream: &mut OwnedWriteHalf<TcpStream>,
     file: &File,
@@ -178,16 +176,14 @@ async fn serve_entry(
 
     if compression.is_some() {
         buf = send_header(stream, buf, entry, compression.as_ref()).await?;
-        buf = send_compressed_entry(stream, file, buf, entry).await?
+        send_compressed_entry(stream, file, buf, entry).await
     } else if is_method_supported(entry.method) {
         buf = send_header(stream, buf, entry, compression.as_ref()).await?;
-        buf = send_decompressed_entry(stream, file, buf, entry).await?
+        send_decompressed_entry(stream, file, buf, entry).await
     } else {
         tracing::error!("Unsupported compression method {:?}", entry.method);
-        serve_not_implemented(stream).await?;
-    };
-    tracing::debug!("finished serving entry");
-    Ok(buf)
+        serve_not_implemented(stream).await.map(|_| buf)
+    }
 }
 
 async fn send_header(
