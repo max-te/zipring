@@ -34,13 +34,12 @@ bzip2 = ["rc-zip/bzip2"]
 lzma = ["rc-zip/lzma"]
 
 [dev-dependencies]
-divan = "0.1.21"
-assert_cmd = "2.0"
-regex = "1.11"
-flate2 = "1.1.8"
+divan = "0.1"
+regex = "1.12"
+flate2 = "1.1"
 ureq = { version = "=3.1.4", features = [
     "gzip",
-] } # 3.2.0 transparently removes encoding headers so we can't tell whether the response was compressed
+], default-features = false } # 3.2.0 transparently removes encoding headers so we can't tell whether the response was compressed
 
 [[bench]]
 name = "http_server"
