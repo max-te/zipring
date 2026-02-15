@@ -16,6 +16,9 @@ use rc_zip::fsm::EntryFsm;
 use rc_zip::parse::Entry;
 use rc_zip::parse::Method;
 use std::io::Cursor;
+use std::io::Error;
+use std::io::ErrorKind;
+use std::io::Seek;
 use std::io::Write;
 use tracing::Instrument as _;
 
@@ -143,7 +146,7 @@ async fn serve_node(
             {
                 serve_entry(stream, file, buf, entry, accepted_encodings).await
             } else {
-                serve_index(*is_root, children, stream).await.map(|_| buf)
+                serve_index(*is_root, children, stream, buf).await
             }
         }
         fstree::FsTreeNode::File { entry, .. } => {
@@ -342,44 +345,93 @@ fn is_method_supported(method: Method) -> bool {
 
 const FRAGMENT: &AsciiSet = &CONTROLS.add(b' ').add(b'"').add(b'<').add(b'>').add(b'`');
 
+#[tracing::instrument(skip_all, level = "info", err)]
 async fn serve_index(
     is_root: bool,
     entries: &[fstree::FsTreeNode],
     stream: &mut OwnedWriteHalf<TcpStream>,
-) -> std::io::Result<()> {
-    let mut listing = Vec::<u8>::with_capacity(32 * 1024);
-
+    mut buf: Buf,
+) -> std::io::Result<Buf> {
     const INDEX_PREAMBLE: &str = include_str!("index.html");
-    listing.write_all(INDEX_PREAMBLE.as_bytes())?;
-    if !is_root {
-        listing.write_all(b"<li class=top><a href=\"..\">..</a>\n")?;
+    const DIGIT_COUNT: u64 = size_of::<usize>() as u64 * 2;
+    const CHUNK_SIZE_LEN: usize = DIGIT_COUNT as usize + 2;
+    let buflen = buf.len();
+    debug_assert!(
+        buf.len() > INDEX_PREAMBLE.len() * 2,
+        "buffer should have ample space"
+    );
+
+    stream.write_all("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nTransfer-Encoding: chunked\r\n\r\n").await.0?;
+
+    async fn flush(
+        stream: &mut OwnedWriteHalf<TcpStream>,
+        mut buf: Buf,
+        len: usize,
+    ) -> std::io::Result<Buf> {
+        buf[CHUNK_SIZE_LEN + len] = b'\r';
+        buf[CHUNK_SIZE_LEN + len + 1] = b'\n';
+
+        const_hex::encode_to_slice(len.to_be_bytes(), &mut buf[0..DIGIT_COUNT as usize]).unwrap();
+        buf[DIGIT_COUNT as usize] = b'\r';
+        buf[DIGIT_COUNT as usize + 1] = b'\n';
+
+        let mut slice = IoBufMut::slice_mut(buf, 0..len + CHUNK_SIZE_LEN + 2);
+        let res;
+        (res, slice) = stream.write_all(slice).await;
+        buf = slice.into_inner();
+        res?;
+        Ok(buf)
     }
+
+    const_hex::encode_to_slice(0usize.to_be_bytes(), &mut buf[0..DIGIT_COUNT as usize]).unwrap();
+    buf[DIGIT_COUNT as usize] = b'\r';
+    buf[DIGIT_COUNT as usize + 1] = b'\n';
+
+    let mut cur = Cursor::new(&mut buf[CHUNK_SIZE_LEN..buflen - 2]);
+    cur.write_all(INDEX_PREAMBLE.as_bytes())?;
+    if !is_root {
+        cur.write_all(b"<li class=top><a href=\"..\">..</a>\n")?;
+    }
+
     for entry in entries {
         if let fstree::FsTreeNode::Dir { name, .. } = entry {
-            listing.write_fmt(format_args!(
+            let mut prepos = cur.position();
+            while let Err(e) = cur.write_fmt(format_args!(
                 "<li class=dir><a href=\"./{name_url}/\">{name_html}</a>\n",
                 name_url = utf8_percent_encode(name, FRAGMENT),
                 name_html = v_htmlescape::escape(name),
-            ))?;
+            )) {
+                if prepos == 0 {
+                    return Err(e);
+                } else {
+                    buf = flush(stream, buf, prepos as usize).await?;
+                    cur = Cursor::new(&mut buf[CHUNK_SIZE_LEN..buflen - 2]);
+                    prepos = cur.position();
+                }
+            }
         }
     }
     for entry in entries {
         if let fstree::FsTreeNode::File { name, .. } = entry {
-            listing.write_fmt(format_args!(
+            let mut prepos = cur.position();
+            while let Err(e) = cur.write_fmt(format_args!(
                 "<li><a href=\"./{name_url}\">{name_html}</a>\n",
                 name_url = utf8_percent_encode(name, FRAGMENT),
                 name_html = v_htmlescape::escape(name),
-            ))?;
+            )) {
+                if prepos == 0 {
+                    return Err(e);
+                } else {
+                    buf = flush(stream, buf, prepos as usize).await?;
+                    cur = Cursor::new(&mut buf[CHUNK_SIZE_LEN..buflen - 2]);
+                    prepos = cur.position();
+                }
+            }
         }
     }
 
-    let header = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n",
-        listing.len()
-    )
-    .into_bytes();
-
-    stream.write_all(header).await.0?;
-    stream.write_all(listing).await.0?;
-    Ok(())
+    let len = cur.position();
+    buf = flush(stream, buf, len as usize).await?;
+    stream.write_all("0\r\n\r\n").await.0?;
+    Ok(buf)
 }

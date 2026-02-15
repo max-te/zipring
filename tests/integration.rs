@@ -123,6 +123,7 @@ fn make_request(
     reader.read_line(&mut status_line)?;
 
     let mut content_length = None;
+    let mut chunked = false;
     let mut headers = String::new();
     loop {
         let mut line = String::new();
@@ -138,11 +139,33 @@ fn make_request(
         if let Some(cl_header) = line.strip_prefix("Content-Length: ") {
             content_length = Some(cl_header.parse::<usize>().unwrap());
         }
+        if line == "Transfer-Encoding: chunked" {
+            chunked = true;
+        }
     }
 
     let body = if let Some(len) = content_length {
         let mut buf = vec![0u8; len];
         reader.read_exact(&mut buf)?;
+        buf
+    } else if chunked {
+        let mut buf = Vec::new();
+        loop {
+            let mut chunk_size = String::new();
+            reader.read_line(&mut chunk_size)?;
+            let chunk_size = <usize>::from_str_radix(chunk_size.trim_end_matches("\r\n"), 16)
+                .expect("Chunk size should be hex");
+            if chunk_size == 0 {
+                reader.read_exact(&mut [0; 2])?;
+                break;
+            }
+            reader = {
+                let mut chunk = reader.take(chunk_size as u64);
+                chunk.read_to_end(&mut buf)?;
+                chunk.into_inner()
+            };
+            reader.read_exact(&mut [0; 2])?;
+        }
         buf
     } else {
         Vec::new()
