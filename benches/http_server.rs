@@ -57,7 +57,7 @@ fn make_request(
     path: &str,
     stream: &mut TcpStream,
     encoding: &str,
-) -> Result<Vec<u8>, std::io::Error> {
+) -> Result<usize, std::io::Error> {
     stream.set_nodelay(true)?;
     let request = format!(
         "GET {} HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: {}\r\n\r\n",
@@ -88,13 +88,13 @@ fn make_request(
     }
 
     if let Some(len) = content_length {
-        let mut body = vec![0u8; len];
-        reader.read_exact(&mut body)?;
-        Ok(body)
+        std::io::copy(&mut reader.by_ref().take(len as u64), &mut std::io::sink())?;
+        Ok(len)
     } else if chunked {
-        let mut body = Vec::new();
+        let mut len = 0;
+        let mut chunk_size = String::new();
         loop {
-            let mut chunk_size = String::new();
+            chunk_size.clear();
             reader.read_line(&mut chunk_size)?;
             let chunk_size = <usize>::from_str_radix(chunk_size.trim_end_matches("\r\n"), 16)
                 .expect("Chunk size should be hex");
@@ -102,16 +102,15 @@ fn make_request(
                 reader.read_exact(&mut [0; 2])?;
                 break;
             }
-            reader = {
-                let mut chunk = reader.take(chunk_size as u64);
-                chunk.read_to_end(&mut body)?;
-                chunk.into_inner()
-            };
-            reader.read_exact(&mut [0; 2])?;
+            len += chunk_size;
+            std::io::copy(
+                &mut reader.by_ref().take(chunk_size as u64 + 2),
+                &mut std::io::sink(),
+            )?;
         }
-        Ok(body)
+        Ok(len)
     } else {
-        Ok(Vec::new())
+        Ok(0)
     }
 }
 
@@ -123,7 +122,7 @@ fn request_directory(b: Bencher) {
     let mut stream = server.connect();
     let sample = make_request("/images", &mut stream, "identity").unwrap();
 
-    b.counter(BytesCount::of_slice(&sample)).bench_local(|| {
+    b.counter(BytesCount::new(sample)).bench_local(|| {
         make_request("/images", &mut stream, "identity").unwrap();
     });
 }
@@ -137,7 +136,7 @@ fn request_file(b: Bencher, encoding: &str) {
     let mut stream = server.connect();
     let sample = make_request("/index.html", &mut stream, encoding).unwrap();
 
-    b.counter(BytesCount::of_slice(&sample)).bench_local(|| {
+    b.counter(BytesCount::new(sample)).bench_local(|| {
         make_request("/index.html", &mut stream, encoding).unwrap();
     });
 }
@@ -148,7 +147,7 @@ fn request_small_file(b: Bencher) {
     let mut stream = server.connect();
     let sample = make_request("/metadata.opf", &mut stream, "deflate").unwrap();
 
-    b.counter(BytesCount::of_slice(&sample)).bench_local(|| {
+    b.counter(BytesCount::new(sample)).bench_local(|| {
         make_request("/metadata.opf", &mut stream, "deflate").unwrap();
     });
     drop(server);
@@ -161,7 +160,7 @@ fn connect_and_request_parallel(b: Bencher, path: &str) {
         let mut stream = server.connect();
         make_request(path, &mut stream, "deflate").unwrap()
     };
-    b.counter(BytesCount::of_slice(&sample)).bench(|| {
+    b.counter(BytesCount::new(sample)).bench(|| {
         let mut stream = server.connect();
         make_request(path, &mut stream, "deflate").unwrap();
     });
