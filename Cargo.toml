@@ -12,7 +12,7 @@ itoa = "1.0.15"
 mime_guess = { version = "2.0.5", default-features = false }
 monoio = { version = "0.2.4", features = ["iouring", "tracing"], default-features = false }
 percent-encoding = "2.3.1"
-rc-zip = { version = "5.3.1", features = ["deflate"] }
+rc-zip = { version = "5.4.1", features = ["deflate"] }
 tracing = { version = "0.1.44", features = ["release_max_level_info"] }
 tracing-subscriber = { version = "0.3.19", features = ["std", "fmt", "ansi"], default-features = false }
 v_htmlescape = "0.15.8"
