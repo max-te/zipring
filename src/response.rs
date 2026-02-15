@@ -84,7 +84,7 @@ async fn serve_not_implemented(
     const MSG: &str = "This file content uses an unsupported compression method.";
     const RESPONSE: &str = formatcp!(
         "HTTP/1.1 500 Unsupported Compression\r\nContent-Length: {}\r\n\r\n{}",
-        MSG.as_bytes().len(),
+        MSG.len(),
         MSG
     );
 
@@ -139,10 +139,10 @@ async fn serve_node(
             children,
             index_html_index,
         } => {
-            if let Some(idx) = index_html_index {
-                if let fstree::FsTreeNode::File { entry, .. } = &children[*idx] {
-                    return serve_entry(stream, file, buf, entry, accepted_encodings).await;
-                }
+            if let Some(idx) = index_html_index
+                && let fstree::FsTreeNode::File { entry, .. } = &children[*idx]
+            {
+                return serve_entry(stream, file, buf, entry, accepted_encodings).await;
             }
             serve_index(*is_root, children, stream).await.map(|_| buf)
         }
@@ -179,14 +179,12 @@ async fn serve_entry(
     if compression.is_some() {
         buf = send_header(stream, buf, entry, compression.as_ref()).await?;
         buf = send_compressed_entry(stream, file, buf, entry).await?
+    } else if is_method_supported(entry.method) {
+        buf = send_header(stream, buf, entry, compression.as_ref()).await?;
+        buf = send_decompressed_entry(stream, file, buf, entry).await?
     } else {
-        if is_method_supported(entry.method) {
-            buf = send_header(stream, buf, entry, compression.as_ref()).await?;
-            buf = send_decompressed_entry(stream, file, buf, entry).await?
-        } else {
-            tracing::error!("Unsupported compression method {:?}", entry.method);
-            serve_not_implemented(stream).await?;
-        }
+        tracing::error!("Unsupported compression method {:?}", entry.method);
+        serve_not_implemented(stream).await?;
     };
     tracing::debug!("finished serving entry");
     Ok(buf)

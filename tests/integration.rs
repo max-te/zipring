@@ -24,7 +24,7 @@ impl ServerHandle {
 
     fn wait(&self) {
         for attempt in 0..600 {
-            if TcpStream::connect(&self.socket_address()).is_ok() {
+            if TcpStream::connect(self.socket_address()).is_ok() {
                 thread::sleep(Duration::from_millis(200));
                 return;
             }
@@ -431,7 +431,7 @@ fn test_connection_close() {
     let server = start_server(TEST_FILE);
     let mut stream = TcpStream::connect(server.socket_address()).expect("Connection failed");
     stream.set_nodelay(true).unwrap();
-    let request = format!("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",);
+    let request = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     stream.write_all(request.as_bytes()).unwrap();
 
     let mut reader = BufReader::new(&stream);
