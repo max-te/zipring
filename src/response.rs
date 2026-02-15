@@ -9,6 +9,9 @@ use monoio::fs::File;
 use monoio::io::AsyncWriteRentExt;
 use monoio::io::OwnedWriteHalf;
 use monoio::net::TcpStream;
+use percent_encoding::AsciiSet;
+use percent_encoding::CONTROLS;
+use percent_encoding::utf8_percent_encode;
 use rc_zip::fsm::EntryFsm;
 use rc_zip::parse::Entry;
 use rc_zip::parse::Method;
@@ -337,7 +340,7 @@ fn is_method_supported(method: Method) -> bool {
     }
 }
 
-static INDEX_PREAMBLE: &str = include_str!("index.html");
+const FRAGMENT: &AsciiSet = &CONTROLS.add(b' ').add(b'"').add(b'<').add(b'>').add(b'`');
 
 async fn serve_index(
     is_root: bool,
@@ -346,23 +349,26 @@ async fn serve_index(
 ) -> std::io::Result<()> {
     let mut listing = Vec::<u8>::with_capacity(32 * 1024);
 
+    const INDEX_PREAMBLE: &str = include_str!("index.html");
     listing.write_all(INDEX_PREAMBLE.as_bytes())?;
     if !is_root {
         listing.write_all(b"<li class=top><a href=\"..\">..</a>\n")?;
     }
     for entry in entries {
-        if let fstree::FsTreeNode::Dir { .. } = entry {
+        if let fstree::FsTreeNode::Dir { name, .. } = entry {
             listing.write_fmt(format_args!(
-                "<li class=dir><a href=\"./{name}/\">{name}</a>\n",
-                name = entry.name()
+                "<li class=dir><a href=\"./{name_url}/\">{name_html}</a>\n",
+                name_url = utf8_percent_encode(name, FRAGMENT),
+                name_html = v_htmlescape::escape(name),
             ))?;
         }
     }
     for entry in entries {
-        if let fstree::FsTreeNode::File { .. } = entry {
+        if let fstree::FsTreeNode::File { name, .. } = entry {
             listing.write_fmt(format_args!(
-                "<li><a href=\"./{name}\">{name}</a>\n",
-                name = entry.name()
+                "<li><a href=\"./{name_url}\">{name_html}</a>\n",
+                name_url = utf8_percent_encode(name, FRAGMENT),
+                name_html = v_htmlescape::escape(name),
             ))?;
         }
     }
