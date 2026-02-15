@@ -5,21 +5,52 @@ use std::thread;
 use std::time::Duration;
 
 use divan::Bencher;
+use divan::counter::BytesCount;
 
 const SERVER_ADDR: &str = "127.0.0.1:50002";
 
-fn start_server(zip_path: &str) -> Child {
-    let exe = env!("CARGO_BIN_EXE_zipring");
-    Command::new(exe)
-        .arg(zip_path)
-        .env("RUST_LOG", "warn")
-        .spawn()
-        .expect("Failed to start server")
+struct ServerHandle {
+    process: Child,
+    addr: String,
 }
 
-fn stop_server(mut child: Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+impl ServerHandle {
+    fn new(zip_path: &str) -> ServerHandle {
+        let exe = env!("CARGO_BIN_EXE_zipring");
+        let child = Command::new(exe)
+            .arg(zip_path)
+            .env("RUST_LOG", "warn")
+            .spawn()
+            .expect("Failed to start server");
+        let server = ServerHandle {
+            process: child,
+            addr: SERVER_ADDR.to_owned(),
+        };
+        server.wait();
+        server
+    }
+
+    fn wait(&self) {
+        for _ in 0..200 {
+            if TcpStream::connect(self.addr.as_str()).is_ok() {
+                thread::sleep(Duration::from_millis(100));
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        panic!("Server failed to start");
+    }
+
+    fn connect(&self) -> TcpStream {
+        TcpStream::connect(self.addr.as_str()).unwrap()
+    }
+}
+
+impl Drop for ServerHandle {
+    fn drop(&mut self) {
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+    }
 }
 
 fn make_request(
@@ -61,95 +92,56 @@ fn make_request(
     }
 }
 
-fn wait_for_server() {
-    for _ in 0..200 {
-        if TcpStream::connect(SERVER_ADDR).is_ok() {
-            thread::sleep(Duration::from_millis(100));
-            return;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    panic!("Server failed to start");
-}
-
 const ZIP_PATH: &str = "tests/resources/Universal_Declaration_of_Human_Rights.htmlz";
 
-#[divan::bench]
+#[divan::bench(sample_size = 10, sample_count = 1000)]
 fn request_directory(b: Bencher) {
-    let server = start_server(ZIP_PATH);
-    wait_for_server();
+    let server = ServerHandle::new(ZIP_PATH);
+    let mut stream = server.connect();
+    let sample = make_request("/images", &mut stream, "identity").unwrap();
 
-    let mut stream = TcpStream::connect(SERVER_ADDR).unwrap();
-    b.bench_local(|| {
+    b.counter(BytesCount::of_slice(&sample)).bench_local(|| {
         make_request("/images", &mut stream, "identity").unwrap();
     });
-
-    stop_server(server);
 }
 
-#[divan::bench]
-fn request_file_deflate(b: Bencher) {
-    let server = start_server(ZIP_PATH);
-    wait_for_server();
+#[divan::bench(
+    args = ["deflate", "identity", "gzip"],
+    sample_size = 10,
+)]
+fn request_file(b: Bencher, encoding: &str) {
+    let server = ServerHandle::new(ZIP_PATH);
+    let mut stream = server.connect();
+    let sample = make_request("/index.html", &mut stream, encoding).unwrap();
 
-    let mut stream = TcpStream::connect(SERVER_ADDR).unwrap();
-    b.bench_local(|| {
-        make_request("/index.html", &mut stream, "deflate").unwrap();
+    b.counter(BytesCount::of_slice(&sample)).bench_local(|| {
+        make_request("/index.html", &mut stream, encoding).unwrap();
     });
-
-    stop_server(server);
 }
 
-#[divan::bench]
-fn request_file_identity(b: Bencher) {
-    let server = start_server(ZIP_PATH);
-    wait_for_server();
-
-    let mut stream = TcpStream::connect(SERVER_ADDR).unwrap();
-    b.bench_local(|| {
-        make_request("/index.html", &mut stream, "identity").unwrap();
-    });
-
-    stop_server(server);
-}
-
-#[divan::bench]
-fn request_file_gzip(b: Bencher) {
-    let server = start_server(ZIP_PATH);
-    wait_for_server();
-
-    let mut stream = TcpStream::connect(SERVER_ADDR).unwrap();
-    b.bench_local(|| {
-        make_request("/index.html", &mut stream, "gzip").unwrap();
-    });
-
-    stop_server(server);
-}
-
-#[divan::bench]
+#[divan::bench(sample_size = 10, sample_count = 1000)]
 fn request_small_file(b: Bencher) {
-    let server = start_server(ZIP_PATH);
-    wait_for_server();
+    let server = ServerHandle::new(ZIP_PATH);
+    let mut stream = server.connect();
+    let sample = make_request("/metadata.opf", &mut stream, "deflate").unwrap();
 
-    let mut stream = TcpStream::connect(SERVER_ADDR).unwrap();
-    b.bench_local(|| {
+    b.counter(BytesCount::of_slice(&sample)).bench_local(|| {
         make_request("/metadata.opf", &mut stream, "deflate").unwrap();
     });
-
-    stop_server(server);
+    drop(server);
 }
 
-#[divan::bench(threads = 4)]
-fn connect_and_request_small_file(b: Bencher) {
-    let server = start_server(ZIP_PATH);
-    wait_for_server();
-
-    b.bench(|| {
-        let mut stream = TcpStream::connect(SERVER_ADDR).unwrap();
-        make_request("/metadata.opf", &mut stream, "deflate").unwrap();
+#[divan::bench(args = ["/metadata.opf", "/index.html", "/images"], threads = [0,2,4,8], sample_size = 3, sample_count = 1000)]
+fn connect_and_request_parallel(b: Bencher, path: &str) {
+    let server = ServerHandle::new(ZIP_PATH);
+    let sample = {
+        let mut stream = server.connect();
+        make_request(path, &mut stream, "deflate").unwrap()
+    };
+    b.counter(BytesCount::of_slice(&sample)).bench(|| {
+        let mut stream = server.connect();
+        make_request(path, &mut stream, "deflate").unwrap();
     });
-
-    stop_server(server);
 }
 
 fn main() {
