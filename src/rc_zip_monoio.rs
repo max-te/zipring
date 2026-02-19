@@ -1,6 +1,6 @@
-//! This file is based on https://github.com/bearcove/rc-zip/pull/92 by @fasterthanlime,
+//! This file is based on <https://github.com/bearcove/rc-zip/pull/92> by @fasterthanlime,
 //! vendored since they have no intentions of maintaining it.
-//! 
+//!
 //! A library for reading zip files asynchronously using monoio I/O traits,
 //! based on top of [rc-zip](https://crates.io/crates/rc-zip).
 //!

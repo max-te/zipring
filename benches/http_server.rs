@@ -59,10 +59,8 @@ fn make_request(
     encoding: &str,
 ) -> Result<usize, std::io::Error> {
     stream.set_nodelay(true)?;
-    let request = format!(
-        "GET {} HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: {}\r\n\r\n",
-        path, encoding
-    );
+    let request =
+        format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: {encoding}\r\n\r\n",);
     stream.write_all(request.as_bytes())?;
 
     let mut reader = BufReader::new(stream);

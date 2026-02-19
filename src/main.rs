@@ -43,7 +43,7 @@ fn main() {
                     .enable_all()
                     .build()
                     .unwrap();
-                rt.block_on(inner_main(i, path, port))
+                rt.block_on(inner_main(i, path, port));
             })
         })
         .collect();
@@ -65,7 +65,7 @@ async fn inner_main(threadid: usize, filepath: PathBuf, port: u16) {
     tree.recursive_sort();
     let tree: &'static FsTreeNode = Box::leak(Box::new(tree));
 
-    let addr = format!("127.0.0.1:{}", port);
+    let addr = format!("127.0.0.1:{port}");
     let listener = TcpListener::bind(&addr).unwrap();
     if threadid == 0 {
         tracing::info!(
@@ -103,14 +103,15 @@ async fn serve(stream: TcpStream, file: &File, tree: &FsTreeNode) {
         let Some(request) = request else {
             break;
         };
-        let close = match request {
-            crate::request::Request::Get { close, .. } => close,
-            _ => false,
+        let close = if let crate::request::Request::Get { close, .. } = request {
+            close
+        } else {
+            false
         };
-        let Ok(_buf) = respond(request, file, tree, &mut stream_write, buf).await else {
+        let Ok(r_buf) = respond(request, file, tree, &mut stream_write, buf).await else {
             break;
         };
-        buf = _buf;
+        buf = r_buf;
         if close {
             tracing::info!("closing connection on request");
             break;
@@ -119,9 +120,9 @@ async fn serve(stream: TcpStream, file: &File, tree: &FsTreeNode) {
     if let Ok(mut stream) = stream_read.reunite(stream_write) {
         if let Err(e) = stream.shutdown().await {
             tracing::error!("shutdown failed: {:?}", e);
-        };
+        }
     } else {
         tracing::error!("reunite failed");
-    };
+    }
     tracing::info!("finished serving connection");
 }

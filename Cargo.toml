@@ -4,6 +4,18 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 
+[[bench]]
+name = "http_server"
+harness = false
+
+[features]
+default = ["deflate"]
+deflate = ["rc-zip/deflate"]
+zstd = ["rc-zip/zstd"]
+deflate64 = ["rc-zip/deflate64"]
+bzip2 = ["rc-zip/bzip2"]
+lzma = ["rc-zip/lzma"]
+
 [dependencies]
 const-hex = "1.17.0"
 const_format = "0.2.35"
@@ -25,14 +37,6 @@ tracing-subscriber = { version = "0.3.19", features = [
 v_htmlescape = "0.15.8"
 winnow = "0.5.36"
 
-[features]
-default = ["deflate"]
-deflate = ["rc-zip/deflate"]
-zstd = ["rc-zip/zstd"]
-deflate64 = ["rc-zip/deflate64"]
-bzip2 = ["rc-zip/bzip2"]
-lzma = ["rc-zip/lzma"]
-
 [dev-dependencies]
 divan = "0.1"
 regex = "1.12"
@@ -41,6 +45,5 @@ ureq = { version = "=3.1.4", features = [
     "gzip",
 ], default-features = false } # 3.2.0 transparently removes encoding headers so we can't tell whether the response was compressed
 
-[[bench]]
-name = "http_server"
-harness = false
+[lints.clippy]
+pedantic = "warn"

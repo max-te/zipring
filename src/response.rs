@@ -16,9 +16,6 @@ use rc_zip::fsm::EntryFsm;
 use rc_zip::parse::Entry;
 use rc_zip::parse::Method;
 use std::io::Cursor;
-use std::io::Error;
-use std::io::ErrorKind;
-use std::io::Seek;
 use std::io::Write;
 use tracing::Instrument as _;
 
@@ -45,7 +42,7 @@ pub async fn respond(
                 return serve_not_found(stream)
                     .instrument(respond_span.exit())
                     .await
-                    .map(|_| buf);
+                    .map(|()| buf);
             };
             if let Some(crc32) = if_none_match
                 && let Some(entry) = node.entry()
@@ -61,7 +58,7 @@ pub async fn respond(
                     .await
             }
         }
-        Request::Bad { status } => serve_bad_request(stream, status).await.map(|_| buf),
+        Request::Bad { status } => serve_bad_request(stream, status).await.map(|()| buf),
     }
 }
 
@@ -188,7 +185,7 @@ async fn serve_entry(
         send_decompressed_entry(stream, file, buf, entry).await
     } else {
         tracing::error!("Unsupported compression method {:?}", entry.method);
-        serve_not_implemented(stream).await.map(|_| buf)
+        serve_not_implemented(stream).await.map(|()| buf)
     }
 }
 
@@ -231,7 +228,7 @@ async fn send_header(
 
     cur.write_all(b"Cache-control: max-age=180, public\r\n\r\n")?;
     // Send header
-    let n = cur.position() as usize;
+    let n = usize::try_from(cur.position()).unwrap();
     buf = cur.into_inner();
     let mut slice = IoBufMut::slice_mut(buf, 0..n);
     let res;
@@ -247,7 +244,7 @@ async fn send_compressed_entry(
     buf: Buf,
     entry: &Entry,
 ) -> Result<Buf, std::io::Error> {
-    let mut len = entry.compressed_size as usize;
+    let mut len = usize::try_from(entry.compressed_size).unwrap();
     let mut gzip_trailer = [0u8; 8];
     if entry.method == Method::Deflate {
         // Write gzip header for deflate
@@ -353,8 +350,8 @@ async fn serve_index(
     mut buf: Buf,
 ) -> std::io::Result<Buf> {
     const INDEX_PREAMBLE: &str = include_str!("index.html");
-    const DIGIT_COUNT: u64 = size_of::<usize>() as u64 * 2;
-    const CHUNK_SIZE_LEN: usize = DIGIT_COUNT as usize + 2;
+    const DIGIT_COUNT: usize = size_of::<usize>() * 2;
+    const CHUNK_SIZE_LEN: usize = DIGIT_COUNT + 2;
     let buflen = buf.len();
     debug_assert!(
         buf.len() > INDEX_PREAMBLE.len() * 2,
@@ -371,9 +368,9 @@ async fn serve_index(
         buf[CHUNK_SIZE_LEN + len] = b'\r';
         buf[CHUNK_SIZE_LEN + len + 1] = b'\n';
 
-        const_hex::encode_to_slice(len.to_be_bytes(), &mut buf[0..DIGIT_COUNT as usize]).unwrap();
-        buf[DIGIT_COUNT as usize] = b'\r';
-        buf[DIGIT_COUNT as usize + 1] = b'\n';
+        const_hex::encode_to_slice(len.to_be_bytes(), &mut buf[0..DIGIT_COUNT]).unwrap();
+        buf[DIGIT_COUNT] = b'\r';
+        buf[DIGIT_COUNT + 1] = b'\n';
 
         let mut slice = IoBufMut::slice_mut(buf, 0..len + CHUNK_SIZE_LEN + 2);
         let res;
@@ -383,9 +380,9 @@ async fn serve_index(
         Ok(buf)
     }
 
-    const_hex::encode_to_slice(0usize.to_be_bytes(), &mut buf[0..DIGIT_COUNT as usize]).unwrap();
-    buf[DIGIT_COUNT as usize] = b'\r';
-    buf[DIGIT_COUNT as usize + 1] = b'\n';
+    const_hex::encode_to_slice(0usize.to_be_bytes(), &mut buf[0..DIGIT_COUNT]).unwrap();
+    buf[DIGIT_COUNT] = b'\r';
+    buf[DIGIT_COUNT + 1] = b'\n';
 
     let mut cur = Cursor::new(&mut buf[CHUNK_SIZE_LEN..buflen - 2]);
     cur.write_all(INDEX_PREAMBLE.as_bytes())?;
@@ -403,11 +400,10 @@ async fn serve_index(
             )) {
                 if prepos == 0 {
                     return Err(e);
-                } else {
-                    buf = flush(stream, buf, prepos as usize).await?;
-                    cur = Cursor::new(&mut buf[CHUNK_SIZE_LEN..buflen - 2]);
-                    prepos = cur.position();
                 }
+                buf = flush(stream, buf, usize::try_from(prepos).unwrap()).await?;
+                cur = Cursor::new(&mut buf[CHUNK_SIZE_LEN..buflen - 2]);
+                prepos = cur.position();
             }
         }
     }
@@ -421,17 +417,16 @@ async fn serve_index(
             )) {
                 if prepos == 0 {
                     return Err(e);
-                } else {
-                    buf = flush(stream, buf, prepos as usize).await?;
-                    cur = Cursor::new(&mut buf[CHUNK_SIZE_LEN..buflen - 2]);
-                    prepos = cur.position();
                 }
+                buf = flush(stream, buf, usize::try_from(prepos).unwrap()).await?;
+                cur = Cursor::new(&mut buf[CHUNK_SIZE_LEN..buflen - 2]);
+                prepos = cur.position();
             }
         }
     }
 
     let len = cur.position();
-    buf = flush(stream, buf, len as usize).await?;
+    buf = flush(stream, buf, usize::try_from(len).unwrap()).await?;
     stream.write_all("0\r\n\r\n").await.0?;
     Ok(buf)
 }

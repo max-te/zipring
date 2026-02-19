@@ -38,24 +38,26 @@ impl FsTreeNode {
             let mut head = path;
             let mut tail = head.split_off(separator);
 
-            let existing_child = children.iter_mut().find(|ch| match ch {
-                FsTreeNode::Dir { name, .. } => head.eq(name),
-                _ => false,
+            let existing_child = children.iter_mut().find(|ch| {
+                if let FsTreeNode::Dir { name, .. } = ch {
+                    head.eq(name)
+                } else {
+                    false
+                }
             });
 
-            let child = match existing_child {
-                Some(c) => c,
-                None => {
-                    let new_child = FsTreeNode::Dir {
-                        name: head.to_owned(),
-                        children: vec![],
-                        entry: None,
-                        is_root: false,
-                        index_html_index: None,
-                    };
-                    children.push(new_child);
-                    children.last_mut().unwrap()
-                }
+            let child = if let Some(c) = existing_child {
+                c
+            } else {
+                let new_child = FsTreeNode::Dir {
+                    name: head.clone(),
+                    children: vec![],
+                    entry: None,
+                    is_root: false,
+                    index_html_index: None,
+                };
+                children.push(new_child);
+                children.last_mut().unwrap()
             };
 
             if tail.len() > 1 {
@@ -76,7 +78,7 @@ impl FsTreeNode {
         } else {
             // Insertion site of a file
             let new_child = FsTreeNode::File {
-                name: path.to_owned(),
+                name: path.clone(),
                 entry,
             };
             if path == "index.html" {
@@ -87,8 +89,8 @@ impl FsTreeNode {
     }
 
     pub(crate) fn insert(&mut self, entry: Entry) {
-        let path = entry.name.to_owned();
-        self.insert_at(entry, path)
+        let path = entry.name.clone();
+        self.insert_at(entry, path);
     }
 
     pub(crate) fn root() -> Self {
@@ -103,8 +105,7 @@ impl FsTreeNode {
 
     pub(crate) fn name(&self) -> &str {
         match self {
-            FsTreeNode::Dir { name, .. } => name,
-            FsTreeNode::File { name, .. } => name,
+            FsTreeNode::Dir { name, .. } | FsTreeNode::File { name, .. } => name,
         }
     }
 

@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::mem::ManuallyDrop;
 use std::net::{TcpStream, ToSocketAddrs};
@@ -52,10 +53,10 @@ impl Drop for ServerHandle {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                println!("===== Server stdout:\n{}\n=====", stdout);
-                println!("===== Server stderr:\n{}\n=====", stderr);
+                println!("===== Server stdout:\n{stdout}\n=====");
+                println!("===== Server stderr:\n{stderr}\n=====");
             }
-            Err(err) => eprintln!("Error waiting for server: {}", err),
+            Err(err) => eprintln!("Error waiting for server: {err}"),
         }
     }
 }
@@ -112,8 +113,7 @@ fn make_request(
     stream.set_nodelay(true)?;
 
     let request = format!(
-        "GET {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAccept-Encoding: {}\r\n\r\n",
-        path, encodings
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAccept-Encoding: {encodings}\r\n\r\n"
     );
     stream.write_all(request.as_bytes())?;
 
@@ -135,7 +135,7 @@ fn make_request(
         if line.is_empty() {
             break;
         }
-        headers.push_str(&format!("{}\n", line));
+        writeln!(headers, "{line}").unwrap();
         if let Some(cl_header) = line.strip_prefix("Content-Length: ") {
             content_length = Some(cl_header.parse::<usize>().unwrap());
         }
