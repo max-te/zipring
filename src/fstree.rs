@@ -24,7 +24,7 @@ impl std::fmt::Debug for FsTreeNode {
 }
 
 impl FsTreeNode {
-    pub(crate) fn insert_at(&mut self, entry: Entry, path: String) {
+    pub(crate) fn insert_at(&mut self, new_entry: Entry, path: String) {
         let FsTreeNode::Dir {
             children,
             index_html_index,
@@ -38,53 +38,49 @@ impl FsTreeNode {
             let mut head = path;
             let mut tail = head.split_off(separator);
 
-            let existing_child = children.iter_mut().find(|ch| {
-                if let FsTreeNode::Dir { name, .. } = ch {
-                    head.eq(name)
-                } else {
-                    false
-                }
-            });
+            let existing_child = children
+                .iter_mut()
+                .find(|ch| matches!(ch, FsTreeNode::Dir { name, .. } if head.eq(name)));
 
-            let child = if let Some(c) = existing_child {
-                c
+            let child = if let Some(child) = existing_child {
+                child
             } else {
-                let new_child = FsTreeNode::Dir {
+                children.push(FsTreeNode::Dir {
                     name: head.clone(),
                     children: vec![],
                     entry: None,
                     is_root: false,
                     index_html_index: None,
-                };
-                children.push(new_child);
-                children.last_mut().unwrap()
+                });
+                children
+                    .last_mut()
+                    .expect("should find the just inserted child")
             };
 
             if tail.len() > 1 {
                 // Recurse
                 let tail = tail.split_off(1);
-                child.insert_at(entry, tail);
+                child.insert_at(new_entry, tail);
             } else {
                 // We are at the insertion site of a directory.
                 match child {
                     FsTreeNode::Dir {
-                        entry: entry_slot, ..
+                        entry: dir_entry, ..
                     } => {
-                        let _ = entry_slot.insert(entry);
+                        let _ = dir_entry.insert(new_entry);
                     }
                     FsTreeNode::File { .. } => unreachable!(),
                 }
             }
         } else {
             // Insertion site of a file
-            let new_child = FsTreeNode::File {
-                name: path.clone(),
-                entry,
-            };
             if path == "index.html" {
                 *index_html_index = Some(children.len());
             }
-            children.push(new_child);
+            children.push(FsTreeNode::File {
+                name: path.clone(),
+                entry: new_entry,
+            });
         }
     }
 
@@ -145,7 +141,7 @@ impl FsTreeNode {
             ..
         } = self
         {
-            children.sort_by(|a, b| PartialOrd::partial_cmp(&a.name(), &b.name()).unwrap());
+            children.sort_by(|a, b| Ord::cmp(&a.name(), &b.name()));
             children.iter_mut().for_each(FsTreeNode::recursive_sort);
             if index_html_index.is_some() {
                 *index_html_index = children.iter().position(|c| c.name() == "index.html");

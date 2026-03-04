@@ -5,7 +5,9 @@ mod response;
 
 use std::num::NonZero;
 use std::path::PathBuf;
+use std::time::Duration;
 
+use miette::{IntoDiagnostic, Result, WrapErr};
 use monoio::IoUringDriver;
 use monoio::fs::File;
 use monoio::io::{AsyncWriteRent, Splitable};
@@ -18,11 +20,14 @@ use crate::response::respond;
 
 type Buf = Box<[u8]>;
 
-fn main() {
+#[derive(Debug)]
+enum Never {}
+
+fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let Some(file_arg) = std::env::args().nth(1) else {
         println!("Usage: zipring ZIPFILE");
-        return;
+        return Ok(());
     };
 
     let filepath = PathBuf::from(file_arg);
@@ -35,28 +40,40 @@ fn main() {
         .map(NonZero::get)
         .unwrap_or(4);
 
-    let threads: Vec<_> = (0..n_threads)
+    let mut threads: Vec<_> = (0..n_threads)
         .map(|i| {
             let path = filepath.clone();
             std::thread::spawn(move || {
                 let mut rt = monoio::RuntimeBuilder::<IoUringDriver>::new()
                     .enable_all()
                     .build()
-                    .unwrap();
-                rt.block_on(inner_main(i, path, port));
+                    .expect("should be able to start runtime");
+                rt.block_on(inner_main(i, path, port))
             })
         })
         .collect();
 
-    for t in threads {
-        let _ = t.join();
+    loop {
+        if let Some(errored_thread) = threads.extract_if(.., |t| t.is_finished()).next() {
+            return Err(errored_thread
+                .join()
+                .expect("should be able to join finished thread")
+                .unwrap_err());
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
-async fn inner_main(threadid: usize, filepath: PathBuf, port: u16) {
-    let file = monoio::fs::File::open(&filepath).await.unwrap();
+async fn inner_main(threadid: usize, filepath: PathBuf, port: u16) -> Result<Never> {
+    let file = monoio::fs::File::open(&filepath)
+        .await
+        .into_diagnostic()
+        .wrap_err_with(|| format!("could not open {}", filepath.display()))?;
     let file: &'static File = Box::leak(Box::new(file));
-    let zip = rc_zip_monoio::read_zip_from_file(file).await.unwrap();
+    let zip = rc_zip_monoio::read_zip_from_file(file)
+        .await
+        .into_diagnostic()
+        .wrap_err("could not parse zip")?;
 
     let mut tree = FsTreeNode::root();
     for entry in zip.entries() {
@@ -66,12 +83,14 @@ async fn inner_main(threadid: usize, filepath: PathBuf, port: u16) {
     let tree: &'static FsTreeNode = Box::leak(Box::new(tree));
 
     let addr = format!("127.0.0.1:{port}");
-    let listener = TcpListener::bind(&addr).unwrap();
+    let listener = TcpListener::bind(&addr)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("could not bind to {addr}"))?;
     if threadid == 0 {
         tracing::info!(
             "Serving {} at http://{}",
             filepath.display(),
-            listener.local_addr().unwrap()
+            listener.local_addr().expect("should have an adress")
         );
     }
     let mut conid = 0usize;

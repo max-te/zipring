@@ -61,7 +61,9 @@ pub async fn find_entry_compressed_data(
     let _n = res?;
 
     let mut i = Partial::new(buf.as_ref());
-    let header = LocalFileHeader::parser.parse_next(&mut i).unwrap();
+    let header = LocalFileHeader::parser
+        .parse_next(&mut i)
+        .map_err(|_| Error::Format(rc_zip::error::FormatError::InvalidLocalHeader))?;
     tracing::debug!(name: "find_entry_compressed_data", ?header);
 
     Ok((

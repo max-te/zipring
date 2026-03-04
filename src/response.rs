@@ -103,7 +103,8 @@ async fn serve_not_modified(
 
     (buf[0..NOT_MODIFIED_TEMPLATE.len()]).copy_from_slice(NOT_MODIFIED_TEMPLATE);
     let etag = &mut buf[CRC_OFFSET..{ CRC_OFFSET + size_of::<u32>() * 2 }];
-    const_hex::encode_to_slice(crc32.to_le_bytes(), etag).unwrap();
+    const_hex::encode_to_slice(crc32.to_le_bytes(), etag)
+        .expect("should be able to hex-encode crc32");
 
     let slice = IoBufMut::slice_mut(buf, 0..NOT_MODIFIED_TEMPLATE.len());
     let (res, slice) = stream.write_all(slice).await;
@@ -228,7 +229,7 @@ async fn send_header(
 
     cur.write_all(b"Cache-control: max-age=180, public\r\n\r\n")?;
     // Send header
-    let n = usize::try_from(cur.position()).unwrap();
+    let n = usize::try_from(cur.position()).expect("response should be adressable with usize");
     buf = cur.into_inner();
     let mut slice = IoBufMut::slice_mut(buf, 0..n);
     let res;
@@ -244,7 +245,7 @@ async fn send_compressed_entry(
     buf: Buf,
     entry: &Entry,
 ) -> Result<Buf, std::io::Error> {
-    let mut len = usize::try_from(entry.compressed_size).unwrap();
+    let mut len = usize::try_from(entry.compressed_size).expect("entry size should fit into usize");
     let mut gzip_trailer = [0u8; 8];
     if entry.method == Method::Deflate {
         // Write gzip header for deflate
@@ -368,7 +369,8 @@ async fn serve_index(
         buf[CHUNK_SIZE_LEN + len] = b'\r';
         buf[CHUNK_SIZE_LEN + len + 1] = b'\n';
 
-        const_hex::encode_to_slice(len.to_be_bytes(), &mut buf[0..DIGIT_COUNT]).unwrap();
+        const_hex::encode_to_slice(len.to_be_bytes(), &mut buf[0..DIGIT_COUNT])
+            .expect("chunk length should be encodable in DIGIT_COUNT hex digits");
         buf[DIGIT_COUNT] = b'\r';
         buf[DIGIT_COUNT + 1] = b'\n';
 
@@ -380,7 +382,8 @@ async fn serve_index(
         Ok(buf)
     }
 
-    const_hex::encode_to_slice(0usize.to_be_bytes(), &mut buf[0..DIGIT_COUNT]).unwrap();
+    const_hex::encode_to_slice(0usize.to_be_bytes(), &mut buf[0..DIGIT_COUNT])
+        .expect("0 should be hex-encodable");
     buf[DIGIT_COUNT] = b'\r';
     buf[DIGIT_COUNT + 1] = b'\n';
 
@@ -401,7 +404,12 @@ async fn serve_index(
                 if prepos == 0 {
                     return Err(e);
                 }
-                buf = flush(stream, buf, usize::try_from(prepos).unwrap()).await?;
+                buf = flush(
+                    stream,
+                    buf,
+                    usize::try_from(prepos).expect("response buffer should be adressable in usize"),
+                )
+                .await?;
                 cur = Cursor::new(&mut buf[CHUNK_SIZE_LEN..buflen - 2]);
                 prepos = cur.position();
             }
@@ -418,7 +426,12 @@ async fn serve_index(
                 if prepos == 0 {
                     return Err(e);
                 }
-                buf = flush(stream, buf, usize::try_from(prepos).unwrap()).await?;
+                buf = flush(
+                    stream,
+                    buf,
+                    usize::try_from(prepos).expect("response buffer should be adressable in usize"),
+                )
+                .await?;
                 cur = Cursor::new(&mut buf[CHUNK_SIZE_LEN..buflen - 2]);
                 prepos = cur.position();
             }
