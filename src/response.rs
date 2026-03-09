@@ -18,6 +18,7 @@ use rc_zip::parse::Method;
 use std::io::Cursor;
 use std::io::Write;
 use tracing::Instrument as _;
+use tracing::field;
 
 use crate::Buf;
 
@@ -26,9 +27,8 @@ pub async fn respond(
     file: &File,
     tree: &FsTreeNode,
     stream: &mut monoio::io::OwnedWriteHalf<TcpStream>,
-    buf: Buf,
 ) -> std::io::Result<Buf> {
-    let respond_span = tracing::info_span!("response").entered();
+    let respond_span = tracing::info_span!("response", path = field::Empty).entered();
     match request {
         Request::Get {
             path,
@@ -36,14 +36,22 @@ pub async fn respond(
             accepted_encodings,
             close: _,
         } => {
-            respond_span.record("path", &path);
-            let Some(node) = tree.find(&path) else {
-                tracing::warn!(?path, "entry not found");
+            let Ok(path_str) = str::from_utf8(&path) else {
+                tracing::warn!("path not utf-8");
                 return serve_not_found(stream)
                     .instrument(respond_span.exit())
                     .await
-                    .map(|()| buf);
+                    .map(|()| path.into_inner());
             };
+            respond_span.record("path", path_str);
+            let Some(node) = tree.find(path_str) else {
+                tracing::warn!("entry not found");
+                return serve_not_found(stream)
+                    .instrument(respond_span.exit())
+                    .await
+                    .map(|()| path.into_inner());
+            };
+            let buf = path.into_inner();
             if let Some(crc32) = if_none_match
                 && let Some(entry) = node.entry()
                 && entry.crc32 == crc32
@@ -58,7 +66,7 @@ pub async fn respond(
                     .await
             }
         }
-        Request::Bad { status } => serve_bad_request(stream, status).await.map(|()| buf),
+        Request::Bad { status, buf } => serve_bad_request(stream, status).await.map(|()| buf),
     }
 }
 

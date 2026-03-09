@@ -1,4 +1,5 @@
 use monoio::{
+    buf::{IoBufMut, SliceMut},
     io::{AsyncReadRent, OwnedReadHalf},
     net::TcpStream,
 };
@@ -23,13 +24,14 @@ impl AcceptedEncodings {
 
 pub enum Request {
     Get {
-        path: String,
+        path: SliceMut<Buf>,
         if_none_match: Option<u32>,
         accepted_encodings: AcceptedEncodings,
         close: bool,
     },
     Bad {
         status: &'static str,
+        buf: Buf,
     },
 }
 
@@ -41,12 +43,12 @@ const METHOD_NOT_ALLOWED: &str = "405 Method Not Allowed";
 pub async fn parse_next_request(
     stream: &mut OwnedReadHalf<TcpStream>,
     buf: Buf,
-) -> (Option<Request>, Buf) {
-    let (res, buf) = stream.read(buf).await;
-    let Ok(len) = res else { return (None, buf) };
+) -> Result<Request, Buf> {
+    let (res, mut buf) = stream.read(buf).await;
+    let Ok(len) = res else { return Err(buf) };
     if len == 0 {
         tracing::debug!("read 0 bytes");
-        return (None, buf);
+        return Err(buf);
     }
 
     let mut headers = [httparse::EMPTY_HEADER; 64];
@@ -54,59 +56,46 @@ pub async fn parse_next_request(
     let body_offset = match req.parse(&buf) {
         Ok(body_offset) => body_offset,
         Err(httparse::Error::TooManyHeaders) => {
-            return (
-                Some(Request::Bad {
-                    status: HEADER_TOO_LONG,
-                }),
+            return Ok(Request::Bad {
+                status: HEADER_TOO_LONG,
                 buf,
-            );
+            });
         }
         _ => {
             tracing::debug!("could not parse request");
-            return (None, buf);
+            return Err(buf);
         }
     };
     if body_offset.is_partial() {
         tracing::debug!("partial request");
         if req.path.is_none() {
-            return (
-                Some(Request::Bad {
-                    status: URI_TOO_LONG,
-                }),
+            return Ok(Request::Bad {
+                status: URI_TOO_LONG,
                 buf,
-            );
+            });
         }
-        return (
-            Some(Request::Bad {
-                status: BAD_REQUEST,
-            }),
+        return Ok(Request::Bad {
+            status: BAD_REQUEST,
             buf,
-        );
+        });
     }
 
     if req.method != Some("GET") {
         tracing::debug!("unsupported method");
-        return (
-            Some(Request::Bad {
-                status: METHOD_NOT_ALLOWED,
-            }),
+        return Ok(Request::Bad {
+            status: METHOD_NOT_ALLOWED,
             buf,
-        );
+        });
     }
 
     let path = req
         .path
-        .expect("path should be set when parsing is complete");
-    let Ok(path) = percent_encoding::percent_decode(path.as_bytes()).decode_utf8() else {
-        tracing::error!("path not decodable");
-        return (
-            Some(Request::Bad {
-                status: BAD_REQUEST,
-            }),
-            buf,
-        );
+        .expect("path should  be set when parsing is complete");
+    let path_offset = unsafe {
+        // SAFETY: path is a slice of buf
+        path.as_ptr().byte_offset_from_unsigned(buf.as_ptr())
     };
-    let path = path.to_string();
+    let path_end = path_offset + path.len();
 
     let mut if_none_match = None;
     let mut accepted_encodings = AcceptedEncodings::default();
@@ -128,15 +117,32 @@ pub async fn parse_next_request(
         }
     }
 
+    let (pre, post) = buf.split_at_mut(path_end);
+
+    let path = &pre[path_offset..path_end];
     tracing::debug!(?path, "GET request");
 
-    (
-        Some(Request::Get {
-            path,
-            if_none_match,
-            accepted_encodings,
-            close,
-        }),
-        buf,
-    )
+    let mut decoded_path_cur = 0;
+    for (i, chunk) in percent_encoding::percent_decode(path).enumerate() {
+        if i == post.len() {
+            break;
+        }
+        post[i] = chunk;
+        decoded_path_cur = i + 1;
+    }
+    if decoded_path_cur == post.len() {
+        tracing::error!("path to long for buffer");
+        return Ok(Request::Bad {
+            status: URI_TOO_LONG,
+            buf,
+        });
+    }
+    let path = IoBufMut::slice_mut(buf, path_end..(path_end + decoded_path_cur));
+
+    Ok(Request::Get {
+        path,
+        if_none_match,
+        accepted_encodings,
+        close,
+    })
 }

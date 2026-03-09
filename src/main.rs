@@ -117,9 +117,7 @@ async fn serve(stream: TcpStream, file: &File, tree: &FsTreeNode) {
 
     let mut buf = vec![0u8; 1024].into_boxed_slice();
     loop {
-        let request;
-        (request, buf) = parse_next_request(&mut stream_read, buf).await;
-        let Some(request) = request else {
+        let Ok(request) = parse_next_request(&mut stream_read, buf).await else {
             break;
         };
         let close = if let crate::request::Request::Get { close, .. } = request {
@@ -127,7 +125,7 @@ async fn serve(stream: TcpStream, file: &File, tree: &FsTreeNode) {
         } else {
             false
         };
-        let Ok(r_buf) = respond(request, file, tree, &mut stream_write, buf).await else {
+        let Ok(r_buf) = respond(request, file, tree, &mut stream_write).await else {
             break;
         };
         buf = r_buf;
