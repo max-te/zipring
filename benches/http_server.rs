@@ -1,3 +1,5 @@
+use std::fmt;
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command};
@@ -6,6 +8,15 @@ use std::time::Duration;
 
 use divan::Bencher;
 use divan::counter::BytesCount;
+
+#[derive(Clone, Copy)]
+struct ServerThreads(usize);
+
+impl fmt::Debug for ServerThreads {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "srv={}", self.0)
+    }
+}
 
 const SERVER_ADDR: &str = "127.0.0.1:50002";
 
@@ -16,12 +27,17 @@ struct ServerHandle {
 
 impl ServerHandle {
     fn new(zip_path: &str) -> ServerHandle {
+        Self::new_with_threads(zip_path, None)
+    }
+
+    fn new_with_threads(zip_path: &str, threads: Option<usize>) -> ServerHandle {
         let exe = env!("CARGO_BIN_EXE_zipring");
-        let child = Command::new(exe)
-            .arg(zip_path)
-            .env("RUST_LOG", "warn")
-            .spawn()
-            .expect("Failed to start server");
+        let mut cmd = Command::new(exe);
+        cmd.arg(zip_path).env("RUST_LOG", "warn");
+        if let Some(n) = threads {
+            cmd.env("ZIPRING_THREADS", n.to_string());
+        }
+        let child = cmd.spawn().expect("Failed to start server");
         let server = ServerHandle {
             process: child,
             addr: SERVER_ADDR.to_owned(),
@@ -161,6 +177,24 @@ fn connect_and_request_parallel(b: Bencher, path: &str) {
     b.counter(BytesCount::new(sample)).bench(|| {
         let mut stream = server.connect();
         make_request(path, &mut stream, "deflate").unwrap();
+    });
+}
+
+#[divan::bench(
+     args = [ServerThreads(1), ServerThreads(2), ServerThreads(4), ServerThreads(8), ServerThreads(12)],
+     threads = [0, 2, 4, 8],
+     sample_size = 3,
+     sample_count = 1000,
+ )]
+fn connect_and_request_parallel_thread_count(b: Bencher, server_threads: ServerThreads) {
+    let server = ServerHandle::new_with_threads(ZIP_PATH, Some(server_threads.0));
+    let sample = {
+        let mut stream = server.connect();
+        make_request("/index.html", &mut stream, "deflate").unwrap()
+    };
+    b.counter(BytesCount::new(sample)).bench(|| {
+        let mut stream = server.connect();
+        make_request("/index.html", &mut stream, "deflate").unwrap();
     });
 }
 
