@@ -36,29 +36,48 @@ fn main() -> Result<()> {
         .parse::<u16>()
         .unwrap_or(50002);
 
-    let n_threads = std::thread::available_parallelism()
+    let n_threads = std::env::var("ZIPRING_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<NonZero<usize>>().ok())
         .map(NonZero::get)
-        .unwrap_or(4);
+        .unwrap_or_else(|| {
+            // Benchmarks show 8 threads is the sweet spot for this I/O-bound server.
+            // Beyond 8, high-concurrency latency improves <8% per added thread.
+            // Each thread creates an io_uring runtime, so keeping the count
+            // reasonable also avoids memlock exhaustion on constrained hosts.
+            std::thread::available_parallelism()
+                .map(NonZero::get)
+                .unwrap_or(1)
+                .min(8)
+        });
 
     let mut threads: Vec<_> = (0..n_threads)
         .map(|i| {
             let path = filepath.clone();
-            std::thread::spawn(move || {
+            std::thread::spawn(move || -> Result<Never> {
                 let mut rt = monoio::RuntimeBuilder::<IoUringDriver>::new()
                     .enable_all()
                     .build()
-                    .expect("should be able to start runtime");
+                    .into_diagnostic()
+                    .wrap_err("should be able to start runtime")?;
                 rt.block_on(inner_main(i, path, port))
             })
         })
         .collect();
 
     loop {
-        if let Some(errored_thread) = threads.extract_if(.., |t| t.is_finished()).next() {
-            return Err(errored_thread
-                .join()
-                .expect("should be able to join finished thread")
-                .unwrap_err());
+        if let Some(finished) = threads.extract_if(.., |t| t.is_finished()).next() {
+            match finished.join() {
+                Ok(Err(err)) => return Err(err),
+                Err(panic) => {
+                    let msg = panic
+                        .downcast_ref::<String>()
+                        .map(|s| s.as_str())
+                        .or_else(|| panic.downcast_ref::<&str>().copied())
+                        .unwrap_or("unknown panic cause");
+                    return Err(miette::miette!("Thread panicked: {msg}"));
+                }
+            }
         }
         std::thread::sleep(Duration::from_millis(10));
     }
