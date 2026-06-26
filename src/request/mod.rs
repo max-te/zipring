@@ -1,7 +1,8 @@
+use std::fmt::Debug;
+
 use monoio::{
     buf::{IoBufMut, SliceMut},
-    io::{AsyncReadRent, OwnedReadHalf},
-    net::TcpStream,
+    io::AsyncReadRent,
 };
 
 use crate::{Buf, response::status::HttpStatus};
@@ -35,8 +36,35 @@ pub enum Request {
     },
 }
 
-pub async fn parse_next_request(
-    stream: &mut OwnedReadHalf<TcpStream>,
+impl Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Request::Get {
+                path,
+                if_none_match,
+                accepted_encodings,
+                close,
+            } => f
+                .debug_struct("Get")
+                .field(
+                    "path",
+                    &str::from_utf8(&path).expect("path should be valid utf-8"),
+                )
+                .field("if_none_match", if_none_match)
+                .field("accepted_encodings", accepted_encodings)
+                .field("close", close)
+                .finish(),
+            Request::Bad { status, buf } => f
+                .debug_struct("Bad")
+                .field("status", status)
+                .field("buf", buf)
+                .finish(),
+        }
+    }
+}
+
+pub async fn parse_next_request<R: AsyncReadRent>(
+    stream: &mut R,
     buf: Buf,
 ) -> Result<Request, Buf> {
     let (res, mut buf) = stream.read(buf).await;
@@ -45,10 +73,9 @@ pub async fn parse_next_request(
         tracing::debug!("read 0 bytes");
         return Err(buf);
     }
-
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
-    let body_offset = match req.parse(&buf) {
+    let body_offset = match req.parse(&buf[..len]) {
         Ok(body_offset) => body_offset,
         Err(httparse::Error::TooManyHeaders) => {
             return Ok(Request::Bad {
@@ -141,3 +168,6 @@ pub async fn parse_next_request(
         close,
     })
 }
+
+#[cfg(test)]
+mod test;
