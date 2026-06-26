@@ -1,7 +1,7 @@
 mod fstree;
 mod rc_zip_monoio;
 mod request;
-mod response;
+pub(crate) mod response;
 
 use std::num::NonZero;
 use std::path::PathBuf;

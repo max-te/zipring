@@ -4,7 +4,7 @@ use monoio::{
     net::TcpStream,
 };
 
-use crate::Buf;
+use crate::{Buf, response::status::HttpStatus};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AcceptedEncodings {
@@ -30,15 +30,10 @@ pub enum Request {
         close: bool,
     },
     Bad {
-        status: &'static str,
+        status: HttpStatus,
         buf: Buf,
     },
 }
-
-const BAD_REQUEST: &str = "400 Bad Request";
-const URI_TOO_LONG: &str = "414 URI Too Long";
-const HEADER_TOO_LONG: &str = "431 Request Header Fields Too Large";
-const METHOD_NOT_ALLOWED: &str = "405 Method Not Allowed";
 
 pub async fn parse_next_request(
     stream: &mut OwnedReadHalf<TcpStream>,
@@ -57,7 +52,7 @@ pub async fn parse_next_request(
         Ok(body_offset) => body_offset,
         Err(httparse::Error::TooManyHeaders) => {
             return Ok(Request::Bad {
-                status: HEADER_TOO_LONG,
+                status: HttpStatus::HeaderTooLong,
                 buf,
             });
         }
@@ -70,12 +65,12 @@ pub async fn parse_next_request(
         tracing::debug!("partial request");
         if req.path.is_none() {
             return Ok(Request::Bad {
-                status: URI_TOO_LONG,
+                status: HttpStatus::UriTooLong,
                 buf,
             });
         }
         return Ok(Request::Bad {
-            status: BAD_REQUEST,
+            status: HttpStatus::BadRequest,
             buf,
         });
     }
@@ -83,7 +78,7 @@ pub async fn parse_next_request(
     if req.method != Some("GET") {
         tracing::debug!("unsupported method");
         return Ok(Request::Bad {
-            status: METHOD_NOT_ALLOWED,
+            status: HttpStatus::MethodNotAllowed,
             buf,
         });
     }
@@ -133,7 +128,7 @@ pub async fn parse_next_request(
     if decoded_path_cur == post.len() {
         tracing::error!("path to long for buffer");
         return Ok(Request::Bad {
-            status: URI_TOO_LONG,
+            status: HttpStatus::UriTooLong,
             buf,
         });
     }

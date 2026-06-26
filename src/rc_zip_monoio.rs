@@ -11,12 +11,30 @@
 
 use crate::Buf;
 use monoio::{buf::IoBufMut, fs::File};
+use rc_zip::parse::Method;
 use rc_zip::{
     error::Error,
     fsm::{ArchiveFsm, FsmResult},
     parse::{Archive, Entry, LocalFileHeader},
 };
 use winnow::{Parser, Partial};
+
+pub const fn is_method_supported(method: Method) -> bool {
+    match method {
+        Method::Store => true,
+        #[cfg(feature = "deflate")]
+        Method::Deflate => true,
+        #[cfg(feature = "zstd")]
+        Method::Zstd => true,
+        #[cfg(feature = "deflate64")]
+        Method::Deflate64 => true,
+        #[cfg(feature = "bzip2")]
+        Method::Bzip2 => true,
+        #[cfg(feature = "lzma")]
+        Method::Lzma => true,
+        _ => false,
+    }
+}
 
 pub async fn read_zip_from_file(file: &File) -> Result<Archive, Error> {
     let meta = file.metadata().await?;
