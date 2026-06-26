@@ -1,6 +1,7 @@
 use rc_zip::parse::Entry;
 
-pub(crate) enum FsTreeNode<E = Entry> {
+#[derive(Clone)]
+pub(crate) enum FsTreeNode<E: Clone = Entry> {
     Dir {
         name: String,
         children: Vec<FsTreeNode<E>>,
@@ -14,7 +15,7 @@ pub(crate) enum FsTreeNode<E = Entry> {
     },
 }
 
-impl<E> std::fmt::Debug for FsTreeNode<E> {
+impl<E: Clone> std::fmt::Debug for FsTreeNode<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Dir { name, children, .. } => f.debug_map().key(name).value(children).finish(),
@@ -30,7 +31,7 @@ impl FsTreeNode<Entry> {
     }
 }
 
-impl<E> FsTreeNode<E> {
+impl<E: Clone> FsTreeNode<E> {
     pub(crate) fn insert_at(&mut self, new_entry: E, path: String) {
         let FsTreeNode::Dir {
             children,

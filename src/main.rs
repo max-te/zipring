@@ -51,6 +51,9 @@ fn main() -> Result<()> {
                 .min(8)
         });
 
+    let tree = read_zip_tree(&filepath)?;
+    let tree: &'static FsTreeNode = Box::leak(Box::new(tree));
+
     let mut threads: Vec<_> = (0..n_threads)
         .map(|i| {
             let path = filepath.clone();
@@ -60,7 +63,7 @@ fn main() -> Result<()> {
                     .build()
                     .into_diagnostic()
                     .wrap_err("should be able to start runtime")?;
-                rt.block_on(inner_main(i, path, port))
+                rt.block_on(inner_main(i, path, port, tree))
             })
         })
         .collect();
@@ -83,23 +86,45 @@ fn main() -> Result<()> {
     }
 }
 
-async fn inner_main(threadid: usize, filepath: PathBuf, port: u16) -> Result<Never> {
+fn read_zip_tree(filepath: &PathBuf) -> Result<FsTreeNode, miette::Error> {
+    let tree: FsTreeNode = monoio::RuntimeBuilder::<IoUringDriver>::new()
+        .enable_all()
+        .build()
+        .into_diagnostic()
+        .wrap_err("should be able to start runtime")?
+        .block_on(async {
+            let file = monoio::fs::File::open(filepath)
+                .await
+                .into_diagnostic()
+                .wrap_err_with(|| format!("could not open {}", filepath.display()))?;
+            let file: &'static File = Box::leak(Box::new(file));
+            let zip = rc_zip_monoio::read_zip_from_file(file)
+                .await
+                .into_diagnostic()
+                .wrap_err("could not parse zip")?;
+
+            let mut tree = FsTreeNode::root();
+            for entry in zip.entries() {
+                tree.insert(entry.clone());
+            }
+            tree.recursive_sort();
+            Ok::<_, miette::Report>(tree)
+        })?;
+
+    Ok(tree)
+}
+
+async fn inner_main(
+    threadid: usize,
+    filepath: PathBuf,
+    port: u16,
+    tree: &'static FsTreeNode,
+) -> Result<Never> {
     let file = monoio::fs::File::open(&filepath)
         .await
         .into_diagnostic()
         .wrap_err_with(|| format!("could not open {}", filepath.display()))?;
     let file: &'static File = Box::leak(Box::new(file));
-    let zip = rc_zip_monoio::read_zip_from_file(file)
-        .await
-        .into_diagnostic()
-        .wrap_err("could not parse zip")?;
-
-    let mut tree = FsTreeNode::root();
-    for entry in zip.entries() {
-        tree.insert(entry.clone());
-    }
-    tree.recursive_sort();
-    let tree: &'static FsTreeNode = Box::leak(Box::new(tree));
 
     let addr = format!("127.0.0.1:{port}");
     let listener = TcpListener::bind(&addr)
@@ -121,7 +146,7 @@ async fn inner_main(threadid: usize, filepath: PathBuf, port: u16) -> Result<Nev
                     tracing::info_span!("connection", thread = threadid, conid = conid).entered();
                 tracing::info!("accepted a connection from {}", addr);
                 let _ = stream.set_nodelay(true);
-                monoio::spawn(serve(stream, file, tree).instrument(span.exit()));
+                monoio::spawn(serve(stream, file, &tree).instrument(span.exit()));
             }
             Err(e) => {
                 tracing::error!(?threadid, "accepting connection failed: {}", e);
