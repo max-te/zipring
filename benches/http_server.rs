@@ -1,7 +1,8 @@
 use std::fmt;
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use std::net::{SocketAddrV4, TcpStream};
+use std::os::unix::net::SocketAddr;
 use std::process::{Child, Command};
 use std::thread;
 use std::time::Duration;
@@ -199,6 +200,9 @@ fn connect_and_request_parallel_thread_count(b: Bencher, server_threads: ServerT
 }
 
 fn main() {
+    if TcpStream::connect(SERVER_ADDR.parse::<SocketAddrV4>().unwrap()).is_ok() {
+        panic!("{SERVER_ADDR} is already in use!")
+    }
     // Run registered benchmarks.
     divan::main();
 }
