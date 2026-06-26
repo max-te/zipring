@@ -46,7 +46,7 @@ async fn test_serve_not_modified() {
     let out = String::from_utf8_lossy(&writer.written);
     assert_eq!(
         out.split("\r\n").collect::<Vec<_>>(),
-        vec!["HTTP/1.1 304 Not Modified", "ETag: \"efbeadde\"", "", ""]
+        vec!["HTTP/1.1 304 Not Modified", "ETag: \"deadbeef\"", "", ""]
     );
 }
 
@@ -66,7 +66,7 @@ async fn test_send_header_with_none_compression() {
             "HTTP/1.1 200 OK",
             "Content-Type: text/css",
             "Content-Length: 4096",
-            "ETag: \"efbeadde\"",
+            "ETag: \"deadbeef\"",
             "Cache-control: max-age=180, public",
             "",
             "",
@@ -97,7 +97,7 @@ async fn test_send_header_with_gzip_compression() {
             "Content-Type: text/css",
             "Content-Encoding: gzip",
             "Content-Length: 1042", // = 1024 + 18
-            "ETag: \"efbeadde\"",
+            "ETag: \"deadbeef\"",
             "Cache-control: max-age=180, public",
             "",
             "",
@@ -128,7 +128,7 @@ async fn test_send_header_with_zstd_compression() {
             "Content-Type: text/css",
             "Content-Encoding: zstd",
             "Content-Length: 1024",
-            "ETag: \"efbeadde\"",
+            "ETag: \"deadbeef\"",
             "Cache-control: max-age=180, public",
             "",
             "",

@@ -370,7 +370,7 @@ impl<'w, W: AsyncWriteRent> ResponseStream<'w, W> {
 
 fn encode_crc32(crc32: u32) -> [u8; const { size_of::<u32>() * 2 }] {
     let mut etag = [0; _];
-    const_hex::encode_to_slice(crc32.to_le_bytes(), &mut etag)
+    const_hex::encode_to_slice(crc32.to_be_bytes(), &mut etag)
         .expect("u32 should always be encodable to 8 hex chars");
     etag
 }

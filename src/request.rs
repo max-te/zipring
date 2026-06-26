@@ -85,7 +85,7 @@ pub async fn parse_next_request(
 
     let path = req
         .path
-        .expect("path should  be set when parsing is complete");
+        .expect("path should be set when parsing is complete");
     let path_offset = unsafe {
         // SAFETY: path is a slice of buf
         path.as_ptr().byte_offset_from_unsigned(buf.as_ptr())
@@ -99,7 +99,7 @@ pub async fn parse_next_request(
         if h.name.eq_ignore_ascii_case("if-none-match") && h.value.len() == 10 {
             let hex_part = &h.value[1..9];
             if let Ok(crc32_bytes) = const_hex::decode_to_array::<&[u8], 4>(hex_part) {
-                let crc32 = u32::from_le_bytes(crc32_bytes);
+                let crc32 = u32::from_be_bytes(crc32_bytes);
                 if_none_match = Some(crc32);
                 break;
             }
