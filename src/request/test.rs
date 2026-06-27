@@ -63,12 +63,14 @@ async fn test_parse_simple_get() {
         result,
         Request::Get {
             path,
-            if_none_match: None,
-            accepted_encodings: AcceptedEncodings {
-                gzip: false,
-                zstd: false
+            headers: Headers {
+                if_none_match: None,
+                accepted_encodings: AcceptedEncodings {
+                    gzip: false,
+                    zstd: false
+                },
+                close: false
             },
-            close: false
         } if &*path == b"/"
     );
 }
@@ -83,7 +85,10 @@ async fn test_parse_get_with_etag() {
     assert_matches!(
         result,
         Request::Get {
-            if_none_match: Some(0xdeadbeef),
+            headers: Headers {
+                if_none_match: Some(0xdeadbeef),
+                ..
+            },
             ..
         }
     );
@@ -100,7 +105,10 @@ async fn test_parse_get_with_invalid_etag() {
     assert_matches!(
         result,
         Request::Get {
-            if_none_match: None,
+            headers: Headers {
+                if_none_match: None,
+                ..
+            },
             ..
         }
     );
@@ -116,9 +124,12 @@ async fn test_parse_get_with_accept_encoding() {
     assert_matches!(
         result,
         Request::Get {
-            accepted_encodings: AcceptedEncodings {
-                gzip: true,
-                zstd: true
+            headers: Headers {
+                accepted_encodings: AcceptedEncodings {
+                    gzip: true,
+                    zstd: true,
+                },
+                ..
             },
             ..
         }
@@ -132,7 +143,13 @@ async fn test_parse_get_with_connection_close() {
     let result = parse_next_request(&mut reader, make_buf(1024))
         .await
         .unwrap();
-    assert_matches!(result, Request::Get { close: true, .. });
+    assert_matches!(
+        result,
+        Request::Get {
+            headers: Headers { close: true, .. },
+            ..
+        }
+    );
 }
 
 #[monoio::test]
@@ -199,10 +216,25 @@ async fn test_parse_partial_with_path_returns_bad_request() {
 }
 
 #[monoio::test]
+async fn test_decode_path() {
+    let path = format!("/a+file%20path/..%2F");
+    let request_line = format!("GET {} HTTP/1.1\r\n\r\n", path);
+    let mut reader = TestReader::new(request_line.as_bytes().to_vec());
+    let result = parse_next_request(&mut reader, make_buf(63)).await.unwrap();
+    assert_matches!(
+        result,
+        Request::Get {
+            path,
+            headers: _,
+        } if matches!(str::from_utf8(&path[..]), Ok("/a+file path/../"))
+    );
+}
+
+#[monoio::test]
 async fn test_parse_path_too_long_for_buffer() {
     // The decoded path is written into the tail of the buffer after the
     // raw path. If decoding consumes every remaining byte the request is
-    // rejected as UriTooLong.  A 30-byte non-encoded path in a 64-byte
+    // rejected as UriTooLong.  A 30-byte non-encoded path in a 63-byte
     // buffer leaves exactly 30 bytes of tail space — enough to trigger.
     let path = format!("/{}", "a".repeat(29)); // 30 bytes
     let request_line = format!("GET {} HTTP/1.1\r\n\r\n", path);

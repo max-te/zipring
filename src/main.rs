@@ -158,16 +158,12 @@ async fn serve(stream: TcpStream, file: Rc<BorrowedFile<'_>>, tree: &FsTreeNode)
         let Ok(request) = parse_next_request(&mut stream_read, buf).await else {
             break;
         };
-        let close = if let crate::request::Request::Get { close, .. } = request {
-            close
-        } else {
-            false
-        };
+        let keep_alive = request.keep_alive();
         let Ok(r_buf) = respond(request, &*file, tree, &mut stream_write).await else {
             break;
         };
         buf = r_buf;
-        if close {
+        if !keep_alive {
             tracing::info!("closing connection on request");
             break;
         }
