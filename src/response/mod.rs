@@ -1,7 +1,7 @@
+use crate::borrowed_file::BorrowedFile;
 use crate::fstree::FsTreeNode;
 use crate::request::Request;
 use crate::response::status::HttpStatus;
-use monoio::fs::File;
 use monoio::io::AsyncWriteRent;
 use tracing::Instrument as _;
 use tracing::field;
@@ -16,7 +16,7 @@ mod test;
 
 pub async fn respond<'w, W: AsyncWriteRent>(
     request: Request,
-    file: &File,
+    file: &BorrowedFile<'_>,
     tree: &FsTreeNode,
     stream: &mut W,
 ) -> std::io::Result<Buf> {

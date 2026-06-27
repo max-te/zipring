@@ -10,6 +10,7 @@
 //!   * [rc-zip-tokio](https://crates.io/crates/rc-zip-tokio) for using tokio traits
 
 use crate::Buf;
+use crate::borrowed_file::BorrowedFile;
 use monoio::{buf::IoBufMut, fs::File};
 use rc_zip::parse::Method;
 use rc_zip::{
@@ -66,7 +67,7 @@ pub async fn read_zip_from_file(file: &File) -> Result<Archive, Error> {
 }
 
 pub async fn find_entry_compressed_data(
-    file: &File,
+    file: &BorrowedFile<'_>,
     entry: &Entry,
     buf: Option<Buf>,
 ) -> Result<(u64, Buf), Error> {

@@ -1,8 +1,8 @@
 use std::io::{Cursor, Write};
 
+use crate::borrowed_file::BorrowedFile;
 use monoio::{
     buf::IoBufMut,
-    fs::File,
     io::{AsyncWriteRent, AsyncWriteRentExt},
 };
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
@@ -103,7 +103,11 @@ impl<'w, W: AsyncWriteRent> ResponseStream<'w, W> {
         self.buf = buf;
         Ok(self)
     }
-    async fn send_compressed_entry(mut self, file: &File, entry: &Entry) -> std::io::Result<Self> {
+    async fn send_compressed_entry(
+        mut self,
+        file: &BorrowedFile<'_>,
+        entry: &Entry,
+    ) -> std::io::Result<Self> {
         let mut buf = self.buf;
 
         let mut len =
@@ -150,7 +154,7 @@ impl<'w, W: AsyncWriteRent> ResponseStream<'w, W> {
     }
     async fn send_decompressed_entry(
         mut self,
-        file: &File,
+        file: &BorrowedFile<'_>,
         entry: &Entry,
     ) -> std::io::Result<Self> {
         let mut buf = self.buf;
@@ -274,7 +278,7 @@ impl<'w, W: AsyncWriteRent> ResponseStream<'w, W> {
     #[tracing::instrument(skip_all, level = "debug")]
     async fn serve_entry(
         self,
-        file: &File,
+        file: &BorrowedFile<'_>,
         entry: &Entry,
         accepted_encodings: AcceptedEncodings,
     ) -> std::io::Result<Self> {
@@ -308,7 +312,7 @@ impl<'w, W: AsyncWriteRent> ResponseStream<'w, W> {
 
     pub async fn serve_node(
         self,
-        file: &File,
+        file: &BorrowedFile<'_>,
         node: &FsTreeNode,
         accepted_encodings: AcceptedEncodings,
     ) -> std::io::Result<Self> {

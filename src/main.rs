@@ -1,3 +1,4 @@
+mod borrowed_file;
 mod fstree;
 mod rc_zip_monoio;
 mod request;
@@ -5,6 +6,7 @@ pub(crate) mod response;
 
 use std::num::NonZero;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Duration;
 
 use miette::{IntoDiagnostic, Result, WrapErr};
@@ -14,6 +16,7 @@ use monoio::io::{AsyncWriteRent, Splitable};
 use monoio::net::{TcpListener, TcpStream};
 use tracing::Instrument;
 
+use crate::borrowed_file::{BorrowedFile, FdBorrowToken, FdOwner};
 use crate::fstree::FsTreeNode;
 use crate::request::parse_next_request;
 use crate::response::respond;
@@ -51,19 +54,19 @@ fn main() -> Result<()> {
                 .min(8)
         });
 
-    let tree = read_zip_tree(&filepath)?;
+    let (file, tree) = read_zip_tree(&filepath)?;
     let tree: &'static FsTreeNode = Box::leak(Box::new(tree));
-
+    let file_holder = Box::leak(Box::new(FdOwner::from(file)));
     let mut threads: Vec<_> = (0..n_threads)
         .map(|i| {
-            let path = filepath.clone();
+            let token = file_holder.token();
             std::thread::spawn(move || -> Result<Never> {
                 let mut rt = monoio::RuntimeBuilder::<IoUringDriver>::new()
                     .enable_all()
                     .build()
                     .into_diagnostic()
                     .wrap_err("should be able to start runtime")?;
-                rt.block_on(inner_main(i, path, port, tree))
+                rt.block_on(inner_main(i, token, port, tree))
             })
         })
         .collect();
@@ -86,8 +89,8 @@ fn main() -> Result<()> {
     }
 }
 
-fn read_zip_tree(filepath: &PathBuf) -> Result<FsTreeNode, miette::Error> {
-    let tree: FsTreeNode = monoio::RuntimeBuilder::<IoUringDriver>::new()
+fn read_zip_tree(filepath: &PathBuf) -> Result<(File, FsTreeNode), miette::Error> {
+    monoio::RuntimeBuilder::<IoUringDriver>::new()
         .enable_all()
         .build()
         .into_diagnostic()
@@ -97,8 +100,7 @@ fn read_zip_tree(filepath: &PathBuf) -> Result<FsTreeNode, miette::Error> {
                 .await
                 .into_diagnostic()
                 .wrap_err_with(|| format!("could not open {}", filepath.display()))?;
-            let file: &'static File = Box::leak(Box::new(file));
-            let zip = rc_zip_monoio::read_zip_from_file(file)
+            let zip = rc_zip_monoio::read_zip_from_file(&file)
                 .await
                 .into_diagnostic()
                 .wrap_err("could not parse zip")?;
@@ -108,32 +110,24 @@ fn read_zip_tree(filepath: &PathBuf) -> Result<FsTreeNode, miette::Error> {
                 tree.insert(entry.clone());
             }
             tree.recursive_sort();
-            Ok::<_, miette::Report>(tree)
-        })?;
-
-    Ok(tree)
+            Ok((file, tree))
+        })
 }
 
 async fn inner_main(
     threadid: usize,
-    filepath: PathBuf,
+    file_token: FdBorrowToken<'static>,
     port: u16,
     tree: &'static FsTreeNode,
 ) -> Result<Never> {
-    let file = monoio::fs::File::open(&filepath)
-        .await
-        .into_diagnostic()
-        .wrap_err_with(|| format!("could not open {}", filepath.display()))?;
-    let file: &'static File = Box::leak(Box::new(file));
-
+    let file: Rc<BorrowedFile<'static>> = Rc::new(file_token.to_borrowed_file());
     let addr = format!("127.0.0.1:{port}");
     let listener = TcpListener::bind(&addr)
         .into_diagnostic()
         .wrap_err_with(|| format!("could not bind to {addr}"))?;
     if threadid == 0 {
         tracing::info!(
-            "Serving {} at http://{}",
-            filepath.display(),
+            "Serving file at http://{}",
             listener.local_addr().expect("should have an adress")
         );
     }
@@ -146,7 +140,7 @@ async fn inner_main(
                     tracing::info_span!("connection", thread = threadid, conid = conid).entered();
                 tracing::info!("accepted a connection from {}", addr);
                 let _ = stream.set_nodelay(true);
-                monoio::spawn(serve(stream, file, &tree).instrument(span.exit()));
+                monoio::spawn(serve(stream, file.clone(), &tree).instrument(span.exit()));
             }
             Err(e) => {
                 tracing::error!(?threadid, "accepting connection failed: {}", e);
@@ -156,7 +150,7 @@ async fn inner_main(
     }
 }
 
-async fn serve(stream: TcpStream, file: &File, tree: &FsTreeNode) {
+async fn serve(stream: TcpStream, file: Rc<BorrowedFile<'_>>, tree: &FsTreeNode) {
     let (mut stream_read, mut stream_write) = stream.into_split();
 
     let mut buf = vec![0u8; 1024].into_boxed_slice();
@@ -169,7 +163,7 @@ async fn serve(stream: TcpStream, file: &File, tree: &FsTreeNode) {
         } else {
             false
         };
-        let Ok(r_buf) = respond(request, file, tree, &mut stream_write).await else {
+        let Ok(r_buf) = respond(request, &*file, tree, &mut stream_write).await else {
             break;
         };
         buf = r_buf;
