@@ -23,11 +23,7 @@ httparse = "1.10.1"
 itoa = "1.0.17"
 miette = { version = "7.6.0", features = ["fancy"] }
 mime_guess = { version = "2.0.5", default-features = false }
-monoio = { version = "0.2.4", features = [
-    "iouring",
-    "tracing",
-    "macros",
-], default-features = false }
+monoio = { version = "0.2.4", features = ["iouring", "tracing"], default-features = false, git = "https://github.com/monoio-rs/monoio/", rev = "f0931e48e13bbeb1bcc3a1dc881dbe5c9385aa6c" }
 percent-encoding = "2.3.2"
 rc-zip = { version = "5.4.1", features = ["deflate"] }
 tracing = { version = "0.1.44", features = ["release_max_level_info"] }

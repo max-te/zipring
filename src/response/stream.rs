@@ -65,32 +65,32 @@ impl<'w, W: AsyncWriteRent> ResponseStream<'w, W> {
         let mime_type = mime_guess::from_path(&entry.name).first_or_text_plain();
         tracing::debug!(?mime_type);
         let mut cur = Cursor::new(buf);
-        cur.write_all(b"HTTP/1.1 200 OK\r\n")?;
+        Write::write_all(&mut cur, b"HTTP/1.1 200 OK\r\n")?;
 
-        cur.write_all(b"Content-Type: ")?;
-        cur.write_all(mime_type.essence_str().as_bytes())?;
-        cur.write_all(b"\r\n")?;
+        Write::write_all(&mut cur, b"Content-Type: ")?;
+        Write::write_all(&mut cur, mime_type.essence_str().as_bytes())?;
+        Write::write_all(&mut cur, b"\r\n")?;
 
         if let Some(ContentCompression { encoding, .. }) = compression {
-            cur.write_all(b"Content-Encoding: ")?;
-            cur.write_all(encoding.as_bytes())?;
-            cur.write_all(b"\r\n")?;
+            Write::write_all(&mut cur, b"Content-Encoding: ")?;
+            Write::write_all(&mut cur, encoding.as_bytes())?;
+            Write::write_all(&mut cur, b"\r\n")?;
         }
 
-        cur.write_all(b"Content-Length: ")?;
+        Write::write_all(&mut cur, b"Content-Length: ")?;
         let content_length = match compression {
             Some(ContentCompression { extra_len, .. }) => entry.compressed_size + extra_len,
             None => entry.uncompressed_size,
         };
         let mut intbuf = itoa::Buffer::new();
-        cur.write_all(intbuf.format(content_length).as_bytes())?;
+        Write::write_all(&mut cur, intbuf.format(content_length).as_bytes())?;
 
-        cur.write_all(b"\r\nETag: \"")?;
+        Write::write_all(&mut cur, b"\r\nETag: \"")?;
         let etag = encode_crc32(entry.crc32);
-        cur.write_all(&etag)?;
-        cur.write_all(b"\"\r\n")?;
+        Write::write_all(&mut cur, &etag)?;
+        Write::write_all(&mut cur, b"\"\r\n")?;
 
-        cur.write_all(b"Cache-control: max-age=180, public\r\n\r\n")?;
+        Write::write_all(&mut cur, b"Cache-control: max-age=180, public\r\n\r\n")?;
         // Send header
         let n = usize::try_from(cur.position()).expect("response should be adressable with usize");
         buf = cur.into_inner();
@@ -215,9 +215,9 @@ impl<'w, W: AsyncWriteRent> ResponseStream<'w, W> {
         buf[HTTP_CHUNK_DIGIT_COUNT + 1] = b'\n';
 
         let mut cur = Cursor::new(&mut buf[HTTP_CHUNK_SIZE_LEN..buflen - 2]);
-        cur.write_all(INDEX_PREAMBLE.as_bytes())?;
+        Write::write_all(&mut cur, INDEX_PREAMBLE.as_bytes())?;
         if !is_root {
-            cur.write_all(b"<li class=top><a href=\"..\">..</a>\n")?;
+            Write::write_all(&mut cur, b"<li class=top><a href=\"..\">..</a>\n")?;
         }
 
         // List directories first
@@ -339,12 +339,12 @@ impl<'w, W: AsyncWriteRent> ResponseStream<'w, W> {
     }
 
     pub async fn serve_not_modified(mut self, crc32: u32) -> std::io::Result<Self> {
-        let mut buf = self.buf;
         const NOT_MODIFIED_TEMPLATE: &[u8] =
             b"HTTP/1.1 304 Not Modified\r\nETag: \"xxxxxxxx\"\r\n\r\n";
         const CRC_OFFSET: usize =
             position(NOT_MODIFIED_TEMPLATE, b'x').expect("template sould have x");
 
+        let mut buf = self.buf;
         buf[0..NOT_MODIFIED_TEMPLATE.len()].copy_from_slice(NOT_MODIFIED_TEMPLATE);
 
         let etag = encode_crc32(crc32);
