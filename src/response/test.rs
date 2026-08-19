@@ -8,153 +8,175 @@ use crate::Buf;
 use crate::fstree::FsTreeNode;
 use crate::response::status::HttpStatus;
 
-#[monoio::test]
-async fn test_serve_not_found() {
-    let mut writer = TestWriter::new();
-    ResponseStream::new(&mut writer, make_buf(1024))
-        .serve_status(HttpStatus::NotFound)
-        .await
-        .unwrap();
-    let out = String::from_utf8_lossy(&writer.written);
-    assert_eq!(
-        out.split("\r\n").collect::<Vec<_>>(),
-        vec!["HTTP/1.1 404 Not Found", "Content-Length: 0", "", ""]
-    );
-}
-
-#[monoio::test]
-async fn test_serve_bad_request() {
-    let mut writer = TestWriter::new();
-    ResponseStream::new(&mut writer, make_buf(1024))
-        .serve_status(HttpStatus::BadRequest)
-        .await
-        .unwrap();
-    let out = String::from_utf8_lossy(&writer.written);
-    assert_eq!(
-        out.split("\r\n").collect::<Vec<_>>(),
-        vec!["HTTP/1.1 400 Bad Request", "Content-Length: 0", "", ""]
-    );
-}
-
-#[monoio::test]
-async fn test_serve_not_modified() {
-    let mut writer = TestWriter::new();
-    ResponseStream::new(&mut writer, make_buf(1024))
-        .serve_not_modified(0xDEADBEEF)
-        .await
-        .unwrap();
-    let out = String::from_utf8_lossy(&writer.written);
-    assert_eq!(
-        out.split("\r\n").collect::<Vec<_>>(),
-        vec!["HTTP/1.1 304 Not Modified", "ETag: \"deadbeef\"", "", ""]
-    );
-}
-
-#[monoio::test]
-async fn test_send_header_with_none_compression() {
-    let mut writer = TestWriter::new();
-    let entry = dummy_entry("style.css", 0xDEADBEEF, ZipMethod::Store, 4096, 4096);
-    ResponseStream::new(&mut writer, make_buf(2048))
-        .send_entry_header(&entry, None)
-        .await
+fn run(future: impl Future) {
+    monoio::RuntimeBuilder::<monoio::IoUringDriver>::new()
+        .enable_all()
+        .build()
         .unwrap()
-        .into_buf();
-    let out = String::from_utf8(writer.written).unwrap();
-    assert_eq!(
-        out.split("\r\n").collect::<Vec<_>>(),
-        vec![
-            "HTTP/1.1 200 OK",
-            "Content-Type: text/css",
-            "Content-Length: 4096",
-            "ETag: \"deadbeef\"",
-            "Cache-control: max-age=180, public",
-            "",
-            "",
-        ]
-    )
+        .block_on(future);
 }
 
-#[monoio::test]
-async fn test_send_header_with_gzip_compression() {
-    let mut writer = TestWriter::new();
-    let entry = dummy_entry("style.css", 0xDEADBEEF, ZipMethod::Deflate, 1024, 4096);
-    ResponseStream::new(&mut writer, make_buf(2048))
-        .send_entry_header(
-            &entry,
-            Some(&ContentCompression {
-                extra_len: 18,
-                encoding: "gzip",
-            }),
-        )
-        .await
-        .unwrap()
-        .into_buf();
-    let out = String::from_utf8(writer.written).unwrap();
-    assert_eq!(
-        out.split("\r\n").collect::<Vec<_>>(),
-        vec![
-            "HTTP/1.1 200 OK",
-            "Content-Type: text/css",
-            "Content-Encoding: gzip",
-            "Content-Length: 1042", // = 1024 + 18
-            "ETag: \"deadbeef\"",
-            "Cache-control: max-age=180, public",
-            "",
-            "",
-        ]
-    )
+#[test]
+fn test_serve_not_found() {
+    run(async {
+        let mut writer = TestWriter::new();
+        ResponseStream::new(&mut writer, make_buf(1024))
+            .serve_status(HttpStatus::NotFound)
+            .await
+            .unwrap();
+        let out = String::from_utf8_lossy(&writer.written);
+        assert_eq!(
+            out.split("\r\n").collect::<Vec<_>>(),
+            vec!["HTTP/1.1 404 Not Found", "Content-Length: 0", "", ""]
+        );
+    });
 }
 
-#[monoio::test]
-async fn test_send_header_with_zstd_compression() {
-    let mut writer = TestWriter::new();
-    let entry = dummy_entry("style.css", 0xDEADBEEF, ZipMethod::Deflate, 1024, 4096);
-    ResponseStream::new(&mut writer, make_buf(2048))
-        .send_entry_header(
-            &entry,
-            Some(&ContentCompression {
-                extra_len: 0,
-                encoding: "zstd",
-            }),
-        )
-        .await
-        .unwrap()
-        .into_buf();
-    let out = String::from_utf8(writer.written).unwrap();
-    assert_eq!(
-        out.split("\r\n").collect::<Vec<_>>(),
-        vec![
-            "HTTP/1.1 200 OK",
-            "Content-Type: text/css",
-            "Content-Encoding: zstd",
-            "Content-Length: 1024",
-            "ETag: \"deadbeef\"",
-            "Cache-control: max-age=180, public",
-            "",
-            "",
-        ]
-    )
+#[test]
+fn test_serve_bad_request() {
+    run(async {
+        let mut writer = TestWriter::new();
+        ResponseStream::new(&mut writer, make_buf(1024))
+            .serve_status(HttpStatus::BadRequest)
+            .await
+            .unwrap();
+        let out = String::from_utf8_lossy(&writer.written);
+        assert_eq!(
+            out.split("\r\n").collect::<Vec<_>>(),
+            vec!["HTTP/1.1 400 Bad Request", "Content-Length: 0", "", ""]
+        );
+    });
 }
 
-#[monoio::test]
-async fn test_serve_index_root() {
-    let mut writer = TestWriter::new();
-    let entries = vec![node_dir("images"), node_file("index.html")];
-    ResponseStream::new(&mut writer, make_buf(4096))
-        .serve_index(true, &entries)
-        .await
-        .unwrap()
-        .into_buf();
-    let out = String::from_utf8_lossy(&writer.written);
-    assert!(
-        out.starts_with("HTTP/1.1 200 OK\r\nContent-Type: text/html;")
-            && out.contains("Transfer-Encoding: chunked")
-    );
-    assert!(out.contains("<li class=dir><a href=\"./images/\">images</a>"));
-    assert!(out.contains("<li><a href=\"./index.html\">index.html</a>"));
-    assert!(!out.contains(".."), "root dir should not have parent link");
+#[test]
+fn test_serve_not_modified() {
+    run(async {
+        let mut writer = TestWriter::new();
+        ResponseStream::new(&mut writer, make_buf(1024))
+            .serve_not_modified(0xDEADBEEF)
+            .await
+            .unwrap();
+        let out = String::from_utf8_lossy(&writer.written);
+        assert_eq!(
+            out.split("\r\n").collect::<Vec<_>>(),
+            vec!["HTTP/1.1 304 Not Modified", "ETag: \"deadbeef\"", "", ""]
+        );
+    });
+}
 
-    assert!(out.ends_with("0\r\n\r\n"), "should end with final chunk");
+#[test]
+fn test_send_header_with_none_compression() {
+    run(async {
+        let mut writer = TestWriter::new();
+        let entry = dummy_entry("style.css", 0xDEADBEEF, ZipMethod::Store, 4096, 4096);
+        ResponseStream::new(&mut writer, make_buf(2048))
+            .send_entry_header(&entry, None)
+            .await
+            .unwrap()
+            .into_buf();
+        let out = String::from_utf8(writer.written).unwrap();
+        assert_eq!(
+            out.split("\r\n").collect::<Vec<_>>(),
+            vec![
+                "HTTP/1.1 200 OK",
+                "Content-Type: text/css",
+                "Content-Length: 4096",
+                "ETag: \"deadbeef\"",
+                "Cache-control: max-age=180, public",
+                "",
+                "",
+            ]
+        );
+    });
+}
+
+#[test]
+fn test_send_header_with_gzip_compression() {
+    run(async {
+        let mut writer = TestWriter::new();
+        let entry = dummy_entry("style.css", 0xDEADBEEF, ZipMethod::Deflate, 1024, 4096);
+        ResponseStream::new(&mut writer, make_buf(2048))
+            .send_entry_header(
+                &entry,
+                Some(&ContentCompression {
+                    extra_len: 18,
+                    encoding: "gzip",
+                }),
+            )
+            .await
+            .unwrap()
+            .into_buf();
+        let out = String::from_utf8(writer.written).unwrap();
+        assert_eq!(
+            out.split("\r\n").collect::<Vec<_>>(),
+            vec![
+                "HTTP/1.1 200 OK",
+                "Content-Type: text/css",
+                "Content-Encoding: gzip",
+                "Content-Length: 1042", // = 1024 + 18
+                "ETag: \"deadbeef\"",
+                "Cache-control: max-age=180, public",
+                "",
+                "",
+            ]
+        );
+    });
+}
+
+#[test]
+fn test_send_header_with_zstd_compression() {
+    run(async {
+        let mut writer = TestWriter::new();
+        let entry = dummy_entry("style.css", 0xDEADBEEF, ZipMethod::Deflate, 1024, 4096);
+        ResponseStream::new(&mut writer, make_buf(2048))
+            .send_entry_header(
+                &entry,
+                Some(&ContentCompression {
+                    extra_len: 0,
+                    encoding: "zstd",
+                }),
+            )
+            .await
+            .unwrap()
+            .into_buf();
+        let out = String::from_utf8(writer.written).unwrap();
+        assert_eq!(
+            out.split("\r\n").collect::<Vec<_>>(),
+            vec![
+                "HTTP/1.1 200 OK",
+                "Content-Type: text/css",
+                "Content-Encoding: zstd",
+                "Content-Length: 1024",
+                "ETag: \"deadbeef\"",
+                "Cache-control: max-age=180, public",
+                "",
+                "",
+            ]
+        );
+    });
+}
+
+#[test]
+fn test_serve_index_root() {
+    run(async {
+        let mut writer = TestWriter::new();
+        let entries = vec![node_dir("images"), node_file("index.html")];
+        ResponseStream::new(&mut writer, make_buf(4096))
+            .serve_index(true, &entries)
+            .await
+            .unwrap()
+            .into_buf();
+        let out = String::from_utf8_lossy(&writer.written);
+        assert!(
+            out.starts_with("HTTP/1.1 200 OK\r\nContent-Type: text/html;")
+                && out.contains("Transfer-Encoding: chunked")
+        );
+        assert!(out.contains("<li class=dir><a href=\"./images/\">images</a>"));
+        assert!(out.contains("<li><a href=\"./index.html\">index.html</a>"));
+        assert!(!out.contains(".."), "root dir should not have parent link");
+
+        assert!(out.ends_with("0\r\n\r\n"), "should end with final chunk");
+    });
 }
 
 /// A test writer that captures all bytes written to it.
