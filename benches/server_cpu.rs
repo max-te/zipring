@@ -74,6 +74,9 @@ struct Scenario {
     path: &'static str,
     encoding: &'static str,
     connections: usize,
+    /// How many requests each client sends before reading any response back. Depth
+    /// beyond one is what leaves several completions outstanding on a ring at once.
+    pipeline: usize,
 }
 
 /// Concurrent enough to keep every server thread busy, few enough that the clients
@@ -86,44 +89,69 @@ const SCENARIOS: &[Scenario] = &[
         path: "/nonexistent",
         encoding: "identity",
         connections: 1,
+        pipeline: 1,
     },
     Scenario {
         label: "small file",
         path: "/metadata.opf",
         encoding: "identity",
         connections: 1,
+        pipeline: 1,
     },
     Scenario {
         label: "passthrough gzip",
         path: "/index.html",
         encoding: "gzip",
         connections: 1,
+        pipeline: 1,
     },
     Scenario {
         label: "inflated",
         path: "/index.html",
         encoding: "identity",
         connections: 1,
+        pipeline: 1,
     },
     Scenario {
         label: "listing",
         path: "/images",
         encoding: "identity",
         connections: 1,
+        pipeline: 1,
     },
     Scenario {
         label: "gzip x8",
         path: "/index.html",
         encoding: "gzip",
         connections: CONCURRENT,
+        pipeline: 1,
     },
     Scenario {
         label: "inflated x8",
         path: "/index.html",
         encoding: "identity",
         connections: CONCURRENT,
+        pipeline: 1,
+    },
+    Scenario {
+        label: "gzip pipe8",
+        path: "/index.html",
+        encoding: "gzip",
+        connections: 1,
+        pipeline: PIPELINE_DEPTH,
+    },
+    Scenario {
+        label: "gzip x8 pipe8",
+        path: "/index.html",
+        encoding: "gzip",
+        connections: CONCURRENT,
+        pipeline: PIPELINE_DEPTH,
     },
 ];
+
+/// Deep enough that a ring has several completions to batch, shallow enough that the
+/// responses in flight still fit comfortably in a socket buffer.
+const PIPELINE_DEPTH: usize = 8;
 
 struct Server {
     process: Child,
@@ -184,31 +212,48 @@ fn free_port() -> u16 {
         .port()
 }
 
-/// One keep-alive connection, issuing requests one at a time.
+/// One keep-alive connection, issuing requests a batch at a time.
 struct Client {
     stream: TcpStream,
     reader: BufReader<TcpStream>,
+    /// The scenario's requests, repeated to the pipeline depth and written as one.
+    batch: Vec<u8>,
+    depth: usize,
 }
 
 impl Client {
-    fn connect(addr: SocketAddr) -> Client {
+    fn connect(addr: SocketAddr, scenario: &Scenario) -> Client {
         let stream = TcpStream::connect(addr).expect("server should accept");
         stream.set_nodelay(true).expect("nodelay should be settable");
         let reader = BufReader::new(stream.try_clone().expect("stream should clone"));
-        Client { stream, reader }
-    }
-
-    /// Send one request and drain its response, returning the body length.
-    fn request(&mut self, scenario: &Scenario) -> usize {
-        // A single write: the server rejects a request split across reads.
         let request = format!(
             "GET {} HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: {}\r\n\r\n",
             scenario.path, scenario.encoding
         );
-        self.stream
-            .write_all(request.as_bytes())
-            .expect("request should be writable");
+        Client {
+            stream,
+            reader,
+            batch: request.repeat(scenario.pipeline).into_bytes(),
+            depth: scenario.pipeline,
+        }
+    }
 
+    /// Send a whole batch of requests, then read back that many responses.
+    ///
+    /// Writing before reading is what puts several requests in the server's hands at
+    /// once; the batch is small enough that it never fills the socket's send buffer,
+    /// so the client cannot wedge itself waiting to write.
+    fn request_batch(&mut self) {
+        self.stream
+            .write_all(&self.batch)
+            .expect("requests should be writable");
+        for _ in 0..self.depth {
+            self.read_response();
+        }
+    }
+
+    /// Drain one response.
+    fn read_response(&mut self) {
         let mut content_length = None;
         let mut chunked = false;
         loop {
@@ -229,9 +274,7 @@ impl Client {
 
         if let Some(len) = content_length {
             self.drain(len as u64);
-            len
         } else if chunked {
-            let mut total = 0;
             loop {
                 let mut line = String::new();
                 self.reader.read_line(&mut line).expect("chunk size readable");
@@ -243,12 +286,8 @@ impl Client {
                         .expect("final CRLF readable");
                     break;
                 }
-                total += size;
                 self.drain(size as u64 + 2);
             }
-            total
-        } else {
-            0
         }
     }
 
@@ -266,20 +305,20 @@ struct Sample {
 }
 
 fn measure(server: &Server, scenario: &Scenario, requests: usize) -> Sample {
-    let each = requests / scenario.connections;
+    let batches = (requests / scenario.connections / scenario.pipeline).max(1);
     // Every client connects and warms up before any of them starts counting, so the
     // timed region holds steady-state serving and nothing else.
     let ready = Barrier::new(scenario.connections + 1);
     let (wall, cpu) = thread::scope(|scope| {
         for _ in 0..scenario.connections {
             scope.spawn(|| {
-                let mut client = Client::connect(server.addr);
+                let mut client = Client::connect(server.addr, scenario);
                 for _ in 0..100 {
-                    client.request(scenario);
+                    client.request_batch();
                 }
                 ready.wait();
-                for _ in 0..each {
-                    client.request(scenario);
+                for _ in 0..batches {
+                    client.request_batch();
                 }
             });
         }
@@ -292,7 +331,7 @@ fn measure(server: &Server, scenario: &Scenario, requests: usize) -> Sample {
     });
     let wall = wall.elapsed().as_secs_f64();
     let cpu = server.cpu_seconds() - cpu;
-    let requests = each * scenario.connections;
+    let requests = batches * scenario.pipeline * scenario.connections;
 
     let per_request = 1e6 / requests as f64;
     Sample {
@@ -332,10 +371,11 @@ fn report_governor() {
 /// Bring the machine to a steady clock before the first measurement, so that round one
 /// is not systematically slower than the rest.
 fn warm_up(servers: &[Server]) {
+    let scenario = &SCENARIOS[SCENARIOS.len() - 1];
     for server in servers {
-        let mut client = Client::connect(server.addr);
-        for _ in 0..20_000 {
-            client.request(&SCENARIOS[SCENARIOS.len() - 1]);
+        let mut client = Client::connect(server.addr, scenario);
+        for _ in 0..20_000 / scenario.pipeline {
+            client.request_batch();
         }
     }
 }
