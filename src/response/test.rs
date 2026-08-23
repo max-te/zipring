@@ -53,7 +53,7 @@ fn test_serve_not_modified() {
     run(async {
         let mut writer = TestWriter::new();
         ResponseStream::new(&mut writer, make_buf(1024))
-            .serve_not_modified(0xDEADBEEF)
+            .serve_not_modified(0xDEAD_BEEF)
             .await
             .unwrap();
         let out = String::from_utf8_lossy(&writer.written);
@@ -66,7 +66,7 @@ fn test_serve_not_modified() {
 
 #[test]
 fn test_send_header_with_none_compression() {
-    let entry = dummy_entry("style.css", 0xDEADBEEF, ZipMethod::Store, 4096, 4096);
+    let entry = dummy_entry("style.css", 0xDEAD_BEEF, ZipMethod::Store, 4096, 4096);
     let out = header_of(&entry, None);
     assert_eq!(
         out.split("\r\n").collect::<Vec<_>>(),
@@ -84,7 +84,7 @@ fn test_send_header_with_none_compression() {
 
 #[test]
 fn test_send_header_with_gzip_compression() {
-    let entry = dummy_entry("style.css", 0xDEADBEEF, ZipMethod::Deflate, 1024, 4096);
+    let entry = dummy_entry("style.css", 0xDEAD_BEEF, ZipMethod::Deflate, 1024, 4096);
     let out = header_of(
         &entry,
         Some(&ContentCompression {
@@ -109,7 +109,7 @@ fn test_send_header_with_gzip_compression() {
 
 #[test]
 fn test_send_header_with_zstd_compression() {
-    let entry = dummy_entry("style.css", 0xDEADBEEF, ZipMethod::Deflate, 1024, 4096);
+    let entry = dummy_entry("style.css", 0xDEAD_BEEF, ZipMethod::Deflate, 1024, 4096);
     let out = header_of(
         &entry,
         Some(&ContentCompression {
@@ -226,7 +226,7 @@ fn dummy_entry(
         crc32,
         compressed_size,
         uncompressed_size,
-        mode: Mode(0o100644),
+        mode: Mode(0o100_644),
         flags: 0,
     }
 }

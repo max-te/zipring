@@ -179,10 +179,10 @@ mod tests {
         let root = FsTreeNode::<i32>::root();
         assert_eq!(root.name(), "");
         assert!(root.entry().is_none());
-        match &root {
-            FsTreeNode::Dir { is_root, .. } => assert!(is_root),
-            _ => panic!("root should be a Dir"),
-        }
+        let FsTreeNode::Dir { is_root, .. } = root else {
+            panic!("root should be a Dir");
+        };
+        assert!(is_root);
     }
 
     #[test]
@@ -288,14 +288,13 @@ mod tests {
         root.insert_at(1, "a.txt".to_string());
         root.insert_at(2, "index.html".to_string());
         root.insert_at(3, "b.txt".to_string());
-        match &root {
-            FsTreeNode::Dir {
-                index_html_index, ..
-            } => {
-                assert_eq!(*index_html_index, Some(1));
-            }
-            _ => panic!("root should be Dir"),
-        }
+        let FsTreeNode::Dir {
+            index_html_index, ..
+        } = root
+        else {
+            panic!("root should be a Dir");
+        };
+        assert_eq!(index_html_index, Some(1));
     }
 
     #[test]
@@ -305,14 +304,12 @@ mod tests {
         root.insert_at(2, "m.txt".to_string());
         root.insert_at(3, "a.txt".to_string());
         root.recursive_sort();
-        match &root {
-            FsTreeNode::Dir { children, .. } => {
-                assert_eq!(children[0].name(), "a.txt");
-                assert_eq!(children[1].name(), "m.txt");
-                assert_eq!(children[2].name(), "z.txt");
-            }
-            _ => panic!("root should be Dir"),
-        }
+        let FsTreeNode::Dir { children, .. } = root else {
+            panic!("root should be a Dir");
+        };
+        assert_eq!(children[0].name(), "a.txt");
+        assert_eq!(children[1].name(), "m.txt");
+        assert_eq!(children[2].name(), "z.txt");
     }
 
     #[test]
@@ -322,19 +319,18 @@ mod tests {
         root.insert_at(2, "index.html".to_string());
         root.insert_at(3, "a.txt".to_string());
         root.recursive_sort();
-        match &root {
-            FsTreeNode::Dir {
-                index_html_index,
-                children,
-                ..
-            } => {
-                assert_eq!(index_html_index, &Some(1));
-                assert_eq!(children[0].name(), "a.txt");
-                assert_eq!(children[1].name(), "index.html");
-                assert_eq!(children[2].name(), "z.txt");
-            }
-            _ => panic!("root should be Dir"),
-        }
+        let FsTreeNode::Dir {
+            children,
+            index_html_index,
+            ..
+        } = root
+        else {
+            panic!("root should be a Dir");
+        };
+        assert_eq!(index_html_index, Some(1));
+        assert_eq!(children[0].name(), "a.txt");
+        assert_eq!(children[1].name(), "index.html");
+        assert_eq!(children[2].name(), "z.txt");
     }
 
     #[test]
@@ -344,20 +340,16 @@ mod tests {
         root.insert_at(2, "a/d.txt".to_string());
         root.insert_at(3, "b/a.txt".to_string());
         root.recursive_sort();
-        match &root {
-            FsTreeNode::Dir { children, .. } => {
-                assert_eq!(children[0].name(), "a");
-                assert_eq!(children[1].name(), "b");
-            }
-            _ => panic!("root should be Dir"),
-        }
-        match root.find("b").unwrap() {
-            FsTreeNode::Dir { children, .. } => {
-                assert_eq!(children[0].name(), "a.txt");
-                assert_eq!(children[1].name(), "c.txt");
-            }
-            _ => panic!("b should be Dir"),
-        }
+        let FsTreeNode::Dir { ref children, .. } = root else {
+            panic!("root should be a Dir");
+        };
+        assert_eq!(children[0].name(), "a");
+        assert_eq!(children[1].name(), "b");
+        let FsTreeNode::Dir { children, .. } = root.find("b").unwrap() else {
+            panic!("root should be a Dir");
+        };
+        assert_eq!(children[0].name(), "a.txt");
+        assert_eq!(children[1].name(), "c.txt");
     }
 
     #[test]
@@ -366,13 +358,12 @@ mod tests {
         root.insert_at(1, "b.txt".to_string());
         root.insert_at(2, "a.txt".to_string());
         root.recursive_sort();
-        match &root {
-            FsTreeNode::Dir {
-                index_html_index, ..
-            } => {
-                assert_eq!(*index_html_index, None);
-            }
-            _ => panic!("root should be Dir"),
-        }
+        let FsTreeNode::Dir {
+            index_html_index, ..
+        } = root
+        else {
+            panic!("root should be a Dir");
+        };
+        assert_eq!(index_html_index, None);
     }
 }

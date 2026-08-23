@@ -76,7 +76,7 @@ fn make_request(
 ) -> Result<usize, std::io::Error> {
     stream.set_nodelay(true)?;
     let request =
-        format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: {encoding}\r\n\r\n",);
+        format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: {encoding}\r\n\r\n");
     stream.write_all(request.as_bytes())?;
 
     let mut reader = BufReader::new(stream);
@@ -203,9 +203,10 @@ fn connection_churn_by_server_threads(b: Bencher, server_threads: ServerThreads)
 }
 
 fn main() {
-    if TcpStream::connect(SERVER_ADDR.parse::<SocketAddrV4>().unwrap()).is_ok() {
-        panic!("{SERVER_ADDR} is already in use!")
-    }
+    assert!(
+        TcpStream::connect(SERVER_ADDR.parse::<SocketAddrV4>().unwrap()).is_err(),
+        "{SERVER_ADDR} is already in use!"
+    );
     // Run registered benchmarks.
     divan::main();
 }

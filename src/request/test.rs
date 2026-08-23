@@ -105,9 +105,7 @@ fn test_parse_simple_get() {
     run(async {
         let data = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n".to_vec();
         let mut reader = TestReader::new(data);
-        let result = parse_one(&mut reader, make_buf(1024))
-            .await
-            .unwrap();
+        let result = parse_one(&mut reader, make_buf(1024)).await.unwrap();
         assert_matches!(
             result,
             Request::Get {
@@ -130,14 +128,12 @@ fn test_parse_get_with_etag() {
     run(async {
         let data = b"GET /style.css HTTP/1.1\r\nIf-None-Match: \"deadbeef\"\r\n\r\n".to_vec();
         let mut reader = TestReader::new(data);
-        let result = parse_one(&mut reader, make_buf(1024))
-            .await
-            .unwrap();
+        let result = parse_one(&mut reader, make_buf(1024)).await.unwrap();
         assert_matches!(
             result,
             Request::Get {
                 headers: Headers {
-                    if_none_match: Some(0xdeadbeef),
+                    if_none_match: Some(0xdead_beef),
                     ..
                 },
                 ..
@@ -152,9 +148,7 @@ fn test_parse_get_with_invalid_etag() {
         // Value is 10 bytes but hex part is not valid hex
         let data = b"GET / HTTP/1.1\r\nIf-None-Match: \"zzzzzzzz\"\r\n\r\n".to_vec();
         let mut reader = TestReader::new(data);
-        let result = parse_one(&mut reader, make_buf(1024))
-            .await
-            .unwrap();
+        let result = parse_one(&mut reader, make_buf(1024)).await.unwrap();
         assert_matches!(
             result,
             Request::Get {
@@ -173,9 +167,7 @@ fn test_parse_get_with_accept_encoding() {
     run(async {
         let data = b"GET / HTTP/1.1\r\nAccept-Encoding: gzip, zstd\r\n\r\n".to_vec();
         let mut reader = TestReader::new(data);
-        let result = parse_one(&mut reader, make_buf(1024))
-            .await
-            .unwrap();
+        let result = parse_one(&mut reader, make_buf(1024)).await.unwrap();
         assert_matches!(
             result,
             Request::Get {
@@ -197,9 +189,7 @@ fn test_parse_get_with_connection_close() {
     run(async {
         let data = b"GET / HTTP/1.1\r\nConnection: close\r\n\r\n".to_vec();
         let mut reader = TestReader::new(data);
-        let result = parse_one(&mut reader, make_buf(1024))
-            .await
-            .unwrap();
+        let result = parse_one(&mut reader, make_buf(1024)).await.unwrap();
         assert_matches!(
             result,
             Request::Get {
@@ -215,9 +205,7 @@ fn test_parse_post_not_allowed() {
     run(async {
         let data = b"POST / HTTP/1.1\r\nContent-Length: 0\r\n\r\n".to_vec();
         let mut reader = TestReader::new(data);
-        let result = parse_one(&mut reader, make_buf(1024))
-            .await
-            .unwrap();
+        let result = parse_one(&mut reader, make_buf(1024)).await.unwrap();
         assert_matches!(
             result,
             Request::Bad {
@@ -302,8 +290,8 @@ fn test_parse_request_too_large_for_buffer() {
 #[test]
 fn test_decode_path() {
     run(async {
-        let path = format!("/a+file%20path/..%2F");
-        let request_line = format!("GET {} HTTP/1.1\r\n\r\n", path);
+        let path = "/a+file%20path/..%2F".to_string();
+        let request_line = format!("GET {path} HTTP/1.1\r\n\r\n");
         let mut reader = TestReader::new(request_line.as_bytes().to_vec());
         let result = parse_one(&mut reader, make_buf(63)).await.unwrap();
         assert_matches!(
@@ -339,8 +327,8 @@ fn test_parse_path_too_long_for_buffer() {
 fn test_parse_pipelined_requests() {
     run(async {
         // Both requests arrive in one read; the second must survive the first.
-        let data =
-            b"GET /first HTTP/1.1\r\nHost: x\r\n\r\nGET /second HTTP/1.1\r\nHost: x\r\n\r\n".to_vec();
+        let data = b"GET /first HTTP/1.1\r\nHost: x\r\n\r\nGET /second HTTP/1.1\r\nHost: x\r\n\r\n"
+            .to_vec();
         let mut stream = TestReader::new(data);
         let mut reader = RequestReader::new();
 
@@ -419,13 +407,11 @@ fn test_parse_too_many_headers() {
         // 65 header lines exceeds the 64-header capacity
         let mut raw = b"GET / HTTP/1.1\r\n".to_vec();
         for i in 0..65 {
-            raw.extend_from_slice(format!("X-Dummy: {}\r\n", i).as_bytes());
+            raw.extend_from_slice(format!("X-Dummy: {i}\r\n").as_bytes());
         }
         raw.extend_from_slice(b"\r\n");
         let mut reader = TestReader::new(raw);
-        let result = parse_one(&mut reader, make_buf(2048))
-            .await
-            .unwrap();
+        let result = parse_one(&mut reader, make_buf(2048)).await.unwrap();
         assert_matches!(
             result,
             Request::Bad {
