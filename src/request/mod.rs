@@ -79,7 +79,7 @@ pub async fn parse_next_request<R: AsyncReadRent>(
     stream: &mut R,
     buf: Buf,
 ) -> Result<Request, Buf> {
-    let (len, buf) = read_stream(stream, buf).await?;
+    let (len, buf) = read_request(stream, buf).await?;
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let httparse::Request {
         method,
@@ -133,7 +133,8 @@ fn try_parse_http<'h, 'b>(
         }
     };
     if body_offset.is_partial() {
-        // TODO: Read again if buf is not full
+        // read_request only gives up once the buffer is full, so this is a request
+        // too large to hold rather than one that has yet to arrive.
         tracing::error!("partial request");
         if req.path.is_none() {
             return Err(Some(HttpStatus::UriTooLong));
@@ -147,14 +148,43 @@ fn bad(status: HttpStatus, buf: Buf) -> Request {
     Request::Bad { status, buf }
 }
 
-async fn read_stream(stream: &mut impl AsyncReadRent, buf: Buf) -> Result<(usize, Buf), Buf> {
-    let (res, buf) = stream.read(buf).await;
-    let Ok(len) = res else { return Err(buf) };
-    if len == 0 {
-        tracing::debug!("read 0 bytes");
-        return Err(buf);
+const HEADERS_END: &[u8] = b"\r\n\r\n";
+
+/// Read until the request's headers are complete, returning how much of `buf` they fill.
+///
+/// A client is entitled to split its request across as many segments as it likes, so a
+/// short read is not a malformed request -- only a closed connection is. A request that
+/// fills the buffer without terminating is handed on regardless, for the parser to
+/// reject with the status that fits.
+async fn read_request(stream: &mut impl AsyncReadRent, mut buf: Buf) -> Result<(usize, Buf), Buf> {
+    let capacity = buf.len();
+    let mut filled = 0;
+    loop {
+        let mut slice = IoBufMut::slice_mut(buf, filled..capacity);
+        let res;
+        (res, slice) = stream.read(slice).await;
+        buf = slice.into_inner();
+
+        let Ok(n) = res else { return Err(buf) };
+        if n == 0 {
+            tracing::debug!("read 0 bytes");
+            return Err(buf);
+        }
+
+        // Start far enough back that a terminator straddling two reads is still found.
+        let search_from = filled.saturating_sub(HEADERS_END.len() - 1);
+        filled += n;
+        if buf[search_from..filled]
+            .windows(HEADERS_END.len())
+            .any(|window| window == HEADERS_END)
+        {
+            return Ok((filled, buf));
+        }
+        if filled == capacity {
+            tracing::error!("request fills the buffer without ending");
+            return Ok((filled, buf));
+        }
     }
-    Ok((len, buf))
 }
 
 // SAFETY: `path` must be a slice within `buf`

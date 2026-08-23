@@ -194,6 +194,33 @@ fn test_request_root() {
 }
 
 #[test]
+fn test_request_split_across_segments() {
+    let zip_path = PathBuf::from(TEST_FILE);
+    let server = start_server(zip_path);
+
+    let mut stream = TcpStream::connect(server.socket_address()).expect("connect failed");
+    stream.set_nodelay(true).expect("nodelay failed");
+
+    // Two writes with the socket flushed between them, so the server has to read twice.
+    stream
+        .write_all(b"GET /index.html HTTP/1.1\r\nHost: local")
+        .expect("first segment failed");
+    std::thread::sleep(Duration::from_millis(50));
+    stream
+        .write_all(b"host\r\nConnection: close\r\n\r\n")
+        .expect("second segment failed");
+
+    let mut response = String::new();
+    BufReader::new(&stream)
+        .read_line(&mut response)
+        .expect("response failed");
+    assert!(
+        response.contains("200 OK"),
+        "a request split across segments should be served, got {response:?}"
+    );
+}
+
+#[test]
 fn test_request_index_html() {
     let zip_path = PathBuf::from(TEST_FILE);
     let server = start_server(zip_path);
