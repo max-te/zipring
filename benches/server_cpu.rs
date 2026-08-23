@@ -318,9 +318,13 @@ fn main() {
 
     for round in 0..rounds {
         eprint!("\rround {}/{rounds}", round + 1);
-        for (v, server) in servers.iter().enumerate() {
-            for (s, scenario) in SCENARIOS.iter().enumerate() {
-                samples[v][s].push(measure(server, scenario, requests));
+        for (s, scenario) in SCENARIOS.iter().enumerate() {
+            // Scenario outermost puts the variants of one comparison seconds apart
+            // rather than a whole round apart, and rotating their order stops the
+            // variant that always goes first from wearing the clock's ramp.
+            for offset in 0..servers.len() {
+                let v = (offset + round) % servers.len();
+                samples[v][s].push(measure(&servers[v], scenario, requests));
             }
         }
     }
