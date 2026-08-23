@@ -8,6 +8,10 @@ license = "MIT"
 name = "http_server"
 harness = false
 
+[[bench]]
+name = "server_cpu"
+harness = false
+
 [features]
 default = ["deflate"]
 deflate = ["rc-zip/deflate"]
