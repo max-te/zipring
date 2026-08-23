@@ -36,6 +36,39 @@ impl AsyncReadRent for TestReader {
     }
 }
 
+/// A test reader that hands out one prepared segment per read, as a client splitting
+/// its request across TCP segments would.
+struct SegmentedReader {
+    segments: std::collections::VecDeque<Vec<u8>>,
+}
+
+impl SegmentedReader {
+    fn new(segments: Vec<Vec<u8>>) -> Self {
+        Self {
+            segments: segments.into(),
+        }
+    }
+}
+
+impl AsyncReadRent for SegmentedReader {
+    async fn read<T: IoBufMut>(&mut self, mut buf: T) -> BufResult<usize, T> {
+        let Some(segment) = self.segments.pop_front() else {
+            return (Ok(0), buf);
+        };
+        let amt = segment.len().min(buf.bytes_total());
+        unsafe {
+            buf.write_ptr()
+                .copy_from_nonoverlapping(segment.as_ptr(), amt);
+            buf.set_init(amt);
+        }
+        (Ok(amt), buf)
+    }
+
+    async fn readv<T: IoVecBufMut>(&mut self, _buf: T) -> BufResult<usize, T> {
+        unimplemented!()
+    }
+}
+
 struct ErrorReader;
 
 impl AsyncReadRent for ErrorReader {
@@ -207,30 +240,49 @@ fn test_parse_empty_read() {
 }
 
 #[test]
-fn test_parse_partial_returns_bad_request() {
+fn test_parse_truncated_request_closes_connection() {
     run(async {
-        // A complete request line with an incomplete first header
+        // A complete request line with an incomplete first header, then end of stream
         let data = b"GET / HTTP/1.1\r\nX-".to_vec();
-        let mut reader = TestReader::new(data.clone());
-        let result = parse_next_request(&mut reader, make_buf(1024))
-            .await
-            .unwrap();
-        assert_matches!(
-            result,
-            Request::Bad {
-                status: HttpStatus::BadRequest,
-                ..
-            }
+        let mut reader = TestReader::new(data);
+        let result = parse_next_request(&mut reader, make_buf(1024)).await;
+        assert!(
+            result.is_err(),
+            "a request the client never finished should close the connection"
         );
     });
 }
+
 #[test]
-fn test_parse_partial_with_path_returns_bad_request() {
+fn test_parse_request_split_across_reads() {
     run(async {
-        // A complete request line with no headers and no second \r\n
-        let data = b"GET / HTTP/1.1\r\n".to_vec();
-        let mut reader = TestReader::new(data.clone());
-        let result = parse_next_request(&mut reader, make_buf(1024))
+        // Every segment boundary, including one that splits the terminator itself
+        for split in 1..35 {
+            let whole = b"GET /style.css HTTP/1.1\r\nHost: localhost\r\n\r\n";
+            let (first, rest) = whole.split_at(split);
+            let mut reader = SegmentedReader::new(vec![first.to_vec(), rest.to_vec()]);
+            let result = parse_next_request(&mut reader, make_buf(1024))
+                .await
+                .unwrap_or_else(|_| panic!("split at {split} should parse"));
+            assert_matches!(
+                result,
+                Request::Get { path, .. } if &*path == b"/style.css",
+                "split at {}", split
+            );
+        }
+    });
+}
+
+#[test]
+fn test_parse_request_too_large_for_buffer() {
+    run(async {
+        // Headers that never terminate, filling the buffer rather than ending
+        let mut data = b"GET / HTTP/1.1\r\n".to_vec();
+        while data.len() < 1024 {
+            data.extend_from_slice(b"X-Padding: 0123456789\r\n");
+        }
+        let mut reader = TestReader::new(data);
+        let result = parse_next_request(&mut reader, make_buf(64))
             .await
             .unwrap();
         assert_matches!(
