@@ -14,6 +14,7 @@ use monoio::IoUringDriver;
 use monoio::fs::File;
 use monoio::io::{AsyncWriteRent, Splitable};
 use monoio::net::{TcpListener, TcpStream};
+use monoio::time::TimeDriver;
 use tracing::Instrument;
 
 use crate::borrowed_file::{BorrowedFile, FdBorrowToken, FdOwner};
@@ -29,6 +30,64 @@ const CONNECTION_BUF_SIZE: usize = 64 * 1024;
 
 #[derive(Debug)]
 enum Never {}
+
+/// Optional `io_uring` setup flags, chosen by the `ZIPRING_URING_FLAGS` environment
+/// variable so that a build can be measured against itself without recompiling.
+#[derive(Clone, Copy, Default, Debug)]
+struct UringFlags {
+    single_issuer: bool,
+    coop_taskrun: bool,
+    defer_taskrun: bool,
+}
+
+impl UringFlags {
+    /// Read the comma-separated flag list, rejecting names and combinations the
+    /// kernel would only refuse later.
+    fn from_env() -> Result<Self> {
+        let mut flags = Self::default();
+        let Ok(list) = std::env::var("ZIPRING_URING_FLAGS") else {
+            return Ok(flags);
+        };
+        for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+            match name {
+                "single_issuer" => flags.single_issuer = true,
+                "coop_taskrun" => flags.coop_taskrun = true,
+                "defer_taskrun" => flags.defer_taskrun = true,
+                other => {
+                    return Err(miette::miette!(
+                        "unknown io_uring flag {other:?}; expected single_issuer, coop_taskrun or defer_taskrun"
+                    ));
+                }
+            }
+        }
+        if flags.defer_taskrun && !flags.single_issuer {
+            return Err(miette::miette!(
+                "defer_taskrun requires single_issuer, which the kernel enforces"
+            ));
+        }
+        Ok(flags)
+    }
+}
+
+/// Build a runtime for the calling thread, which then owns its ring.
+fn build_runtime(flags: UringFlags) -> Result<monoio::Runtime<TimeDriver<IoUringDriver>>> {
+    let mut urb = monoio::IoUring::builder();
+    if flags.single_issuer {
+        urb.setup_single_issuer();
+    }
+    if flags.coop_taskrun {
+        urb.setup_coop_taskrun();
+    }
+    if flags.defer_taskrun {
+        urb.setup_defer_taskrun();
+    }
+    monoio::RuntimeBuilder::<IoUringDriver>::new()
+        .enable_all()
+        .uring_builder(urb)
+        .build()
+        .into_diagnostic()
+        .wrap_err("should be able to start runtime")
+}
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -58,18 +117,16 @@ fn main() -> Result<()> {
                 .min(8)
         });
 
-    let (file, tree) = read_zip_tree(&filepath)?;
+    let uring_flags = UringFlags::from_env()?;
+
+    let (file, tree) = read_zip_tree(&filepath, uring_flags)?;
     let tree: &'static FsTreeNode = Box::leak(Box::new(tree));
     let file_holder = Box::leak(Box::new(FdOwner::from(file)));
     let mut threads: Vec<_> = (0..n_threads)
         .map(|i| {
             let token = file_holder.token();
             std::thread::spawn(move || -> Result<Never> {
-                let mut rt = monoio::RuntimeBuilder::<IoUringDriver>::new()
-                    .enable_all()
-                    .build()
-                    .into_diagnostic()
-                    .wrap_err("should be able to start runtime")?;
+                let mut rt = build_runtime(uring_flags)?;
                 rt.block_on(inner_main(i, token, port, tree))
             })
         })
@@ -93,29 +150,27 @@ fn main() -> Result<()> {
     }
 }
 
-fn read_zip_tree(filepath: &PathBuf) -> Result<(File, FsTreeNode), miette::Error> {
-    monoio::RuntimeBuilder::<IoUringDriver>::new()
-        .enable_all()
-        .build()
-        .into_diagnostic()
-        .wrap_err("should be able to start runtime")?
-        .block_on(async {
-            let file = monoio::fs::File::open(filepath)
-                .await
-                .into_diagnostic()
-                .wrap_err_with(|| format!("could not open {}", filepath.display()))?;
-            let zip = rc_zip_monoio::read_zip_from_file(&file)
-                .await
-                .into_diagnostic()
-                .wrap_err("could not parse zip")?;
+fn read_zip_tree(
+    filepath: &PathBuf,
+    uring_flags: UringFlags,
+) -> Result<(File, FsTreeNode), miette::Error> {
+    build_runtime(uring_flags)?.block_on(async {
+        let file = monoio::fs::File::open(filepath)
+            .await
+            .into_diagnostic()
+            .wrap_err_with(|| format!("could not open {}", filepath.display()))?;
+        let zip = rc_zip_monoio::read_zip_from_file(&file)
+            .await
+            .into_diagnostic()
+            .wrap_err("could not parse zip")?;
 
-            let mut tree = FsTreeNode::root();
-            for entry in zip.entries() {
-                tree.insert(entry.clone());
-            }
-            tree.recursive_sort();
-            Ok((file, tree))
-        })
+        let mut tree = FsTreeNode::root();
+        for entry in zip.entries() {
+            tree.insert(entry.clone());
+        }
+        tree.recursive_sort();
+        Ok((file, tree))
+    })
 }
 
 async fn inner_main(

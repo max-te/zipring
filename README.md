@@ -23,3 +23,14 @@ cargo build --release
 ```
 
 The server will start listening on `http://127.0.0.1:50002`.
+
+### Tuning
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PORT` | `50002` | Port to listen on. |
+| `ZIPRING_THREADS` | cores, capped at 8 | Worker threads, each with its own io_uring. |
+| `ZIPRING_URING_FLAGS` | none | Comma-separated io_uring setup flags: `single_issuer`, `coop_taskrun`, `defer_taskrun` (which requires `single_issuer`). |
+
+The flags exist so that one build can be measured against itself; `benches/server_cpu.rs`
+compares them, and so far none of them has moved the needle at one request in flight.
