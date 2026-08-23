@@ -8,7 +8,7 @@ pub enum HttpStatus {
 }
 
 impl HttpStatus {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             HttpStatus::NotFound => "404 Not Found",
             HttpStatus::BadRequest => "400 Bad Request",
