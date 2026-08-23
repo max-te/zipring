@@ -2,7 +2,6 @@ use std::fmt;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddrV4, TcpStream};
-use std::os::unix::net::SocketAddr;
 use std::process::{Child, Command};
 use std::thread;
 use std::time::Duration;
