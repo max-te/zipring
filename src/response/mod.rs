@@ -14,7 +14,7 @@ mod stream;
 #[cfg(test)]
 mod test;
 
-pub async fn respond<'w, W: AsyncWriteRent>(
+pub async fn respond<W: AsyncWriteRent>(
     request: Request,
     file: &BorrowedFile<'_>,
     tree: &FsTreeNode,

@@ -60,7 +60,7 @@ impl Debug for Request {
                 .debug_struct("Get")
                 .field(
                     "path",
-                    &str::from_utf8(&path).expect("path should be valid utf-8"),
+                    &str::from_utf8(path).expect("path should be valid utf-8"),
                 )
                 .field("if_none_match", &headers.if_none_match)
                 .field("accepted_encodings", &headers.accepted_encodings)
@@ -286,7 +286,7 @@ fn extract_headers(parsed_headers: &mut [httparse::Header<'_>]) -> Headers {
                 headers.if_none_match = Some(crc32);
             }
         } else if h.name.eq_ignore_ascii_case("accept-encoding") {
-            headers.accepted_encodings = AcceptedEncodings::from_header(&h);
+            headers.accepted_encodings = AcceptedEncodings::from_header(h);
         } else if h.name.eq_ignore_ascii_case("connection")
             && h.value.eq_ignore_ascii_case(b"close")
         {

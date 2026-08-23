@@ -105,17 +105,18 @@ fn main() -> Result<()> {
     let n_threads = std::env::var("ZIPRING_THREADS")
         .ok()
         .and_then(|v| v.parse::<NonZero<usize>>().ok())
-        .map(NonZero::get)
-        .unwrap_or_else(|| {
-            // Benchmarks show 8 threads is the sweet spot for this I/O-bound server.
-            // Beyond 8, high-concurrency latency improves <8% per added thread.
-            // Each thread creates an io_uring runtime, so keeping the count
-            // reasonable also avoids memlock exhaustion on constrained hosts.
-            std::thread::available_parallelism()
-                .map(NonZero::get)
-                .unwrap_or(1)
-                .min(8)
-        });
+        .map_or_else(
+            || {
+                // Benchmarks show 8 threads is the sweet spot for this I/O-bound server.
+                // Beyond 8, high-concurrency latency improves <8% per added thread.
+                // Each thread creates an io_uring runtime, so keeping the count
+                // reasonable also avoids memlock exhaustion on constrained hosts.
+                std::thread::available_parallelism()
+                    .map_or(1, NonZero::get)
+                    .min(8)
+            },
+            NonZero::get,
+        );
 
     let uring_flags = UringFlags::from_env()?;
 
@@ -139,7 +140,7 @@ fn main() -> Result<()> {
                 Err(panic) => {
                     let msg = panic
                         .downcast_ref::<String>()
-                        .map(|s| s.as_str())
+                        .map(std::string::String::as_str)
                         .or_else(|| panic.downcast_ref::<&str>().copied())
                         .unwrap_or("unknown panic cause");
                     return Err(miette::miette!("Thread panicked: {msg}"));
@@ -199,7 +200,7 @@ async fn inner_main(
                     tracing::info_span!("connection", thread = threadid, conid = conid).entered();
                 tracing::info!("accepted a connection from {}", addr);
                 let _ = stream.set_nodelay(true);
-                monoio::spawn(serve(stream, file.clone(), &tree).instrument(span.exit()));
+                monoio::spawn(serve(stream, file.clone(), tree).instrument(span.exit()));
             }
             Err(e) => {
                 tracing::error!(?threadid, "accepting connection failed: {}", e);
@@ -219,7 +220,7 @@ async fn serve(stream: TcpStream, file: Rc<BorrowedFile<'_>>, tree: &FsTreeNode)
             break;
         };
         let keep_alive = request.keep_alive();
-        let Ok(r_buf) = respond(request, &*file, tree, &mut stream_write).await else {
+        let Ok(r_buf) = respond(request, &file, tree, &mut stream_write).await else {
             break;
         };
         buf = r_buf;

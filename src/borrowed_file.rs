@@ -49,7 +49,7 @@ impl FdOwner {
     /// Obtain a thread-safe token that can be used to construct a
     /// [`BorrowedFile`] on any thread.
     #[inline]
-    pub fn token<'a>(&'a self) -> FdBorrowToken<'a> {
+    pub fn token(&self) -> FdBorrowToken<'_> {
         FdBorrowToken {
             fd: self.fd,
             _marker: std::marker::PhantomData,
@@ -97,7 +97,7 @@ impl<'a> FdBorrowToken<'a> {
 ///
 /// Constructed exclusively via [`FdBorrowToken::to_borrowed_file`].
 ///
-/// Must be constructed inside the monoio runtime (io_uring instance) that
+/// Must be constructed inside the monoio runtime (`io_uring` instance) that
 /// will use it, because [`monoio::fs::File`] is `!Send`.
 #[derive(Debug)]
 pub struct BorrowedFile<'a> {
@@ -105,7 +105,7 @@ pub struct BorrowedFile<'a> {
     _marker: std::marker::PhantomData<&'a ()>,
 }
 
-impl<'a> BorrowedFile<'a> {
+impl BorrowedFile<'_> {
     /// Wrap a raw file descriptor into a `BorrowedFile`.
     ///
     /// # Safety
