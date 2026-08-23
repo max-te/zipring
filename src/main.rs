@@ -19,12 +19,12 @@ use tracing::Instrument;
 
 use crate::borrowed_file::{BorrowedFile, FdBorrowToken, FdOwner};
 use crate::fstree::FsTreeNode;
-use crate::request::parse_next_request;
+use crate::request::RequestReader;
 use crate::response::respond;
 
 type Buf = Box<[u8]>;
 
-/// Per-connection scratch buffer: holds the request while parsing, then each
+/// Per-connection response buffer: holds the decoded path, then each
 /// response chunk. Sized so that typical entries are served in a single write.
 const CONNECTION_BUF_SIZE: usize = 64 * 1024;
 
@@ -212,9 +212,10 @@ async fn inner_main(
 async fn serve(stream: TcpStream, file: Rc<BorrowedFile<'_>>, tree: &FsTreeNode) {
     let (mut stream_read, mut stream_write) = stream.into_split();
 
+    let mut reader = RequestReader::new();
     let mut buf = vec![0u8; CONNECTION_BUF_SIZE].into_boxed_slice();
     loop {
-        let Ok(request) = parse_next_request(&mut stream_read, buf).await else {
+        let Ok(request) = reader.next_request(&mut stream_read, buf).await else {
             break;
         };
         let keep_alive = request.keep_alive();

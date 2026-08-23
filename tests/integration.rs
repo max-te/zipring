@@ -221,6 +221,52 @@ fn test_request_split_across_segments() {
 }
 
 #[test]
+fn test_pipelined_requests() {
+    let zip_path = PathBuf::from(TEST_FILE);
+    let server = start_server(zip_path);
+
+    let mut stream = TcpStream::connect(server.socket_address()).expect("connect failed");
+    stream.set_nodelay(true).expect("nodelay failed");
+
+    // Both requests in one write, so the server reads them together and must answer
+    // the second from bytes it buffered while answering the first.
+    stream
+        .write_all(
+            b"GET /metadata.opf HTTP/1.1\r\nHost: localhost\r\n\r\n\
+              GET /style.css HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .expect("write failed");
+
+    let mut reader = BufReader::new(&stream);
+    for expected in ["application/oebps-package+xml", "text/css"] {
+        let mut content_type = None;
+        let mut body_length = 0;
+        loop {
+            let mut line = String::new();
+            let read = reader.read_line(&mut line).expect("header read failed");
+            assert!(read != 0, "connection closed before the {expected} response");
+            let line = line.trim_end_matches("\r\n");
+            if line.is_empty() {
+                break;
+            }
+            if let Some(value) = line.strip_prefix("Content-Type: ") {
+                content_type = Some(value.to_string());
+            }
+            if let Some(value) = line.strip_prefix("Content-Length: ") {
+                body_length = value.parse::<u64>().expect("length should parse");
+            }
+        }
+        assert_eq!(
+            content_type.as_deref(),
+            Some(expected),
+            "pipelined responses should come back in order"
+        );
+        std::io::copy(&mut reader.by_ref().take(body_length), &mut std::io::sink())
+            .expect("body read failed");
+    }
+}
+
+#[test]
 fn test_request_index_html() {
     let zip_path = PathBuf::from(TEST_FILE);
     let server = start_server(zip_path);
