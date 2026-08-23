@@ -66,20 +66,29 @@ pub async fn read_zip_from_file(file: &File) -> Result<Archive, Error> {
     }
 }
 
+/// Local file headers are variable-length; this is ample for name and extra field.
+const LOCAL_HEADER_SCRATCH: usize = 1024;
+
+/// Locates the compressed data of `entry`, reading its local file header into
+/// `buf` at `at` -- behind whatever the caller has already staged in front.
 pub async fn find_entry_compressed_data(
     file: &BorrowedFile<'_>,
     entry: &Entry,
-    buf: Option<Buf>,
+    buf: Buf,
+    at: usize,
 ) -> Result<(u64, Buf), Error> {
-    let mut buf = buf.unwrap_or_else(|| vec![0u8; 1024].into_boxed_slice());
+    let mut buf = buf;
     let offset = entry.header_offset;
     let (res, slice) = file
-        .read_at(IoBufMut::slice_mut(buf, 0..1024), offset)
+        .read_at(
+            IoBufMut::slice_mut(buf, at..at + LOCAL_HEADER_SCRATCH),
+            offset,
+        )
         .await;
     buf = slice.into_inner();
-    let _n = res?;
+    let n = res?;
 
-    let mut i = Partial::new(buf.as_ref());
+    let mut i = Partial::new(&buf[at..at + n]);
     let header = LocalFileHeader::parser
         .parse_next(&mut i)
         .map_err(|_| Error::Format(rc_zip::error::FormatError::InvalidLocalHeader))?;

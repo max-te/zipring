@@ -66,94 +66,70 @@ fn test_serve_not_modified() {
 
 #[test]
 fn test_send_header_with_none_compression() {
-    run(async {
-        let mut writer = TestWriter::new();
-        let entry = dummy_entry("style.css", 0xDEADBEEF, ZipMethod::Store, 4096, 4096);
-        ResponseStream::new(&mut writer, make_buf(2048))
-            .send_entry_header(&entry, None)
-            .await
-            .unwrap()
-            .into_buf();
-        let out = String::from_utf8(writer.written).unwrap();
-        assert_eq!(
-            out.split("\r\n").collect::<Vec<_>>(),
-            vec![
-                "HTTP/1.1 200 OK",
-                "Content-Type: text/css",
-                "Content-Length: 4096",
-                "ETag: \"deadbeef\"",
-                "Cache-control: max-age=180, public",
-                "",
-                "",
-            ]
-        );
-    });
+    let entry = dummy_entry("style.css", 0xDEADBEEF, ZipMethod::Store, 4096, 4096);
+    let out = header_of(&entry, None);
+    assert_eq!(
+        out.split("\r\n").collect::<Vec<_>>(),
+        vec![
+            "HTTP/1.1 200 OK",
+            "Content-Type: text/css",
+            "Content-Length: 4096",
+            "ETag: \"deadbeef\"",
+            "Cache-control: max-age=180, public",
+            "",
+            "",
+        ]
+    );
 }
 
 #[test]
 fn test_send_header_with_gzip_compression() {
-    run(async {
-        let mut writer = TestWriter::new();
-        let entry = dummy_entry("style.css", 0xDEADBEEF, ZipMethod::Deflate, 1024, 4096);
-        ResponseStream::new(&mut writer, make_buf(2048))
-            .send_entry_header(
-                &entry,
-                Some(&ContentCompression {
-                    extra_len: 18,
-                    encoding: "gzip",
-                }),
-            )
-            .await
-            .unwrap()
-            .into_buf();
-        let out = String::from_utf8(writer.written).unwrap();
-        assert_eq!(
-            out.split("\r\n").collect::<Vec<_>>(),
-            vec![
-                "HTTP/1.1 200 OK",
-                "Content-Type: text/css",
-                "Content-Encoding: gzip",
-                "Content-Length: 1042", // = 1024 + 18
-                "ETag: \"deadbeef\"",
-                "Cache-control: max-age=180, public",
-                "",
-                "",
-            ]
-        );
-    });
+    let entry = dummy_entry("style.css", 0xDEADBEEF, ZipMethod::Deflate, 1024, 4096);
+    let out = header_of(
+        &entry,
+        Some(&ContentCompression {
+            extra_len: 18,
+            encoding: "gzip",
+        }),
+    );
+    assert_eq!(
+        out.split("\r\n").collect::<Vec<_>>(),
+        vec![
+            "HTTP/1.1 200 OK",
+            "Content-Type: text/css",
+            "Content-Encoding: gzip",
+            "Content-Length: 1042", // = 1024 + 18
+            "ETag: \"deadbeef\"",
+            "Cache-control: max-age=180, public",
+            "",
+            "",
+        ]
+    );
 }
 
 #[test]
 fn test_send_header_with_zstd_compression() {
-    run(async {
-        let mut writer = TestWriter::new();
-        let entry = dummy_entry("style.css", 0xDEADBEEF, ZipMethod::Deflate, 1024, 4096);
-        ResponseStream::new(&mut writer, make_buf(2048))
-            .send_entry_header(
-                &entry,
-                Some(&ContentCompression {
-                    extra_len: 0,
-                    encoding: "zstd",
-                }),
-            )
-            .await
-            .unwrap()
-            .into_buf();
-        let out = String::from_utf8(writer.written).unwrap();
-        assert_eq!(
-            out.split("\r\n").collect::<Vec<_>>(),
-            vec![
-                "HTTP/1.1 200 OK",
-                "Content-Type: text/css",
-                "Content-Encoding: zstd",
-                "Content-Length: 1024",
-                "ETag: \"deadbeef\"",
-                "Cache-control: max-age=180, public",
-                "",
-                "",
-            ]
-        );
-    });
+    let entry = dummy_entry("style.css", 0xDEADBEEF, ZipMethod::Deflate, 1024, 4096);
+    let out = header_of(
+        &entry,
+        Some(&ContentCompression {
+            extra_len: 0,
+            encoding: "zstd",
+        }),
+    );
+    assert_eq!(
+        out.split("\r\n").collect::<Vec<_>>(),
+        vec![
+            "HTTP/1.1 200 OK",
+            "Content-Type: text/css",
+            "Content-Encoding: zstd",
+            "Content-Length: 1024",
+            "ETag: \"deadbeef\"",
+            "Cache-control: max-age=180, public",
+            "",
+            "",
+        ]
+    );
 }
 
 #[test]
@@ -253,6 +229,12 @@ fn dummy_entry(
         mode: Mode(0o100644),
         flags: 0,
     }
+}
+
+/// Render an entry's response header into a buffer and read it back as text.
+fn header_of(entry: &Entry, compression: Option<&ContentCompression>) -> String {
+    let (buf, len) = write_entry_header(make_buf(2048), entry, compression).unwrap();
+    String::from_utf8(buf[..len].to_vec()).unwrap()
 }
 
 /// Create a test buffer of the given size.
