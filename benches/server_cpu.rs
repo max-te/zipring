@@ -23,6 +23,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command};
+use std::sync::Barrier;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -63,37 +64,64 @@ const VARIANTS: &[Variant] = &[
 ];
 
 /// A request to repeat. The first is the floor against which the others are read.
+///
+/// `connections` clients share the request budget between them, each on its own
+/// keep-alive connection. Beyond one, `wall us/req` stops being a latency and becomes
+/// the inverse of throughput; server CPU per request stays comparable either way,
+/// being a sum over the server's threads.
 struct Scenario {
     label: &'static str,
     path: &'static str,
     encoding: &'static str,
+    connections: usize,
 }
+
+/// Concurrent enough to keep every server thread busy, few enough that the clients
+/// still leave this 16-core box cores to serve from.
+const CONCURRENT: usize = 8;
 
 const SCENARIOS: &[Scenario] = &[
     Scenario {
         label: "404 (floor)",
         path: "/nonexistent",
         encoding: "identity",
+        connections: 1,
     },
     Scenario {
         label: "small file",
         path: "/metadata.opf",
         encoding: "identity",
+        connections: 1,
     },
     Scenario {
         label: "passthrough gzip",
         path: "/index.html",
         encoding: "gzip",
+        connections: 1,
     },
     Scenario {
         label: "inflated",
         path: "/index.html",
         encoding: "identity",
+        connections: 1,
     },
     Scenario {
         label: "listing",
         path: "/images",
         encoding: "identity",
+        connections: 1,
+    },
+    Scenario {
+        label: "gzip x8",
+        path: "/index.html",
+        encoding: "gzip",
+        connections: CONCURRENT,
+    },
+    Scenario {
+        label: "inflated x8",
+        path: "/index.html",
+        encoding: "identity",
+        connections: CONCURRENT,
     },
 ];
 
@@ -238,18 +266,33 @@ struct Sample {
 }
 
 fn measure(server: &Server, scenario: &Scenario, requests: usize) -> Sample {
-    let mut client = Client::connect(server.addr);
-    for _ in 0..100 {
-        client.request(scenario);
-    }
+    let each = requests / scenario.connections;
+    // Every client connects and warms up before any of them starts counting, so the
+    // timed region holds steady-state serving and nothing else.
+    let ready = Barrier::new(scenario.connections + 1);
+    let (wall, cpu) = thread::scope(|scope| {
+        for _ in 0..scenario.connections {
+            scope.spawn(|| {
+                let mut client = Client::connect(server.addr);
+                for _ in 0..100 {
+                    client.request(scenario);
+                }
+                ready.wait();
+                for _ in 0..each {
+                    client.request(scenario);
+                }
+            });
+        }
 
-    let cpu_before = server.cpu_seconds();
-    let started = Instant::now();
-    for _ in 0..requests {
-        client.request(scenario);
-    }
-    let wall = started.elapsed().as_secs_f64();
-    let cpu = server.cpu_seconds() - cpu_before;
+        ready.wait();
+        let cpu_before = server.cpu_seconds();
+        let started = Instant::now();
+        // Leaving the scope joins every client, so both readings span all of them.
+        (started, cpu_before)
+    });
+    let wall = wall.elapsed().as_secs_f64();
+    let cpu = server.cpu_seconds() - cpu;
+    let requests = each * scenario.connections;
 
     let per_request = 1e6 / requests as f64;
     Sample {

@@ -167,8 +167,12 @@ fn request_small_file(b: Bencher) {
     drop(server);
 }
 
+/// Connection churn: every iteration opens a connection, makes one request and drops
+/// it, so TCP setup and teardown are inside the timed region and dominate it. A real
+/// workload, but not a measure of how fast an entry is served -- for that see
+/// `benches/server_cpu.rs`, which serves over keep-alive connections.
 #[divan::bench(args = ["/metadata.opf", "/index.html", "/images"], threads = [0,2,4,8], sample_size = 3, sample_count = 1000)]
-fn connect_and_request_parallel(b: Bencher, path: &str) {
+fn connection_churn(b: Bencher, path: &str) {
     let server = ServerHandle::new(ZIP_PATH);
     let sample = {
         let mut stream = server.connect();
@@ -186,7 +190,7 @@ fn connect_and_request_parallel(b: Bencher, path: &str) {
      sample_size = 3,
      sample_count = 1000,
  )]
-fn connect_and_request_parallel_thread_count(b: Bencher, server_threads: ServerThreads) {
+fn connection_churn_by_server_threads(b: Bencher, server_threads: ServerThreads) {
     let server = ServerHandle::new_with_threads(ZIP_PATH, Some(server_threads.0));
     let sample = {
         let mut stream = server.connect();
