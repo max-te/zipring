@@ -69,6 +69,10 @@ fn start_server(zip_path: impl Into<PathBuf>) -> ServerHandle {
             std::process::Command::new(exe)
                 .arg(zip_path.into())
                 .env("PORT", port.to_string())
+                // These tests run in parallel and none of them cares about thread
+                // scaling. One io_uring per server rather than eight keeps the suite
+                // clear of the memlock ceiling, which it was starting to hit.
+                .env("ZIPRING_THREADS", "1")
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .spawn()
