@@ -58,7 +58,14 @@ async fn flush_chunk<W: AsyncWriteRent>(
     Ok(slice.into_inner())
 }
 
-const GZIP_HEADER: [u8; 10] = [0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF];
+const GZIP_HEADER: [u8; 10] = [
+    0x1f, 0x8b, // Magic number
+    0x08, // Compression method = DEFLATE
+    0x00, // No flags
+    0x00, 0x00, 0x00, 0x00, // No MTIME
+    0x00, // No extra flags
+    0xFF, // Filesystem unknown
+];
 const GZIP_TRAILER_LEN: usize = 8;
 
 /// Lays the response header out at the front of `buf`, returning its length.
