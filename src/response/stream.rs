@@ -70,7 +70,7 @@ pub(super) fn write_entry_header(
     entry: &Entry,
     compression: Option<&ContentCompression>,
 ) -> std::io::Result<(Buf, usize)> {
-    let mime_type = mime_guess::from_path(&entry.name).first_or_text_plain();
+    let mime_type = mime_guess::from_path(&entry.name).first_or_octet_stream();
     tracing::debug!(?mime_type);
     let mut cur = Cursor::new(buf);
     Write::write_all(&mut cur, b"HTTP/1.1 200 OK\r\n")?;
