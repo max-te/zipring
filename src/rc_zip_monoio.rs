@@ -9,16 +9,15 @@
 //!   * [rc-zip-sync](https://crates.io/crates/rc-zip-sync) for using std I/O traits
 //!   * [rc-zip-tokio](https://crates.io/crates/rc-zip-tokio) for using tokio traits
 
-use crate::Buf;
 use crate::borrowed_file::BorrowedFile;
+use monoio::buf::IoBuf;
 use monoio::{buf::IoBufMut, fs::File};
 use rc_zip::parse::Method;
 use rc_zip::{
     error::Error,
     fsm::{ArchiveFsm, FsmResult},
-    parse::{Archive, Entry, LocalFileHeader},
+    parse::{Archive, Entry},
 };
-use winnow::{Parser, Partial};
 
 pub const fn is_method_supported(method: Method) -> bool {
     match method {
@@ -66,36 +65,41 @@ pub async fn read_zip_from_file(file: &File) -> Result<Archive, Error> {
     }
 }
 
-/// Local file headers are variable-length; this is ample for name and extra field.
-const LOCAL_HEADER_SCRATCH: usize = 1024;
-
-/// Locates the compressed data of `entry`, reading its local file header into
-/// `buf` at `at` -- behind whatever the caller has already staged in front.
-pub async fn find_entry_compressed_data(
+/// Locates the compressed data of `entry`, storing its local file header in `buf`,
+/// as a scratch buffer. It must have at least 30 bytes of space.
+/// Returns the offset to the compressed file stream in `file`.
+pub async fn find_entry_compressed_data<B: IoBuf + IoBufMut>(
     file: &BorrowedFile<'_>,
     entry: &Entry,
-    buf: Buf,
-    at: usize,
-) -> Result<(u64, Buf), Error> {
+    buf: B,
+) -> Result<(u64, B), Error> {
     let mut buf = buf;
     let offset = entry.header_offset;
-    let (res, slice) = file
-        .read_at(
-            IoBufMut::slice_mut(buf, at..at + LOCAL_HEADER_SCRATCH),
-            offset,
-        )
-        .await;
-    buf = slice.into_inner();
-    let n = res?;
+    // https://en.wikipedia.org/wiki/ZIP_(file_format)#Local_file_header
+    let mut cursor = 0;
+    while cursor < 30 {
+        let (res, slice) = file
+            .read_at(IoBufMut::slice_mut(buf, cursor..30), offset)
+            .await;
+        buf = slice.into_inner();
+        let n = res?;
+        if n == 0 {
+            return Err(Error::IO(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "file ends within local header",
+            )));
+        }
+        cursor += n;
+    }
+    let header = buf.as_slice();
 
-    let mut i = Partial::new(&buf[at..at + n]);
-    let header = LocalFileHeader::parser
-        .parse_next(&mut i)
-        .map_err(|_| Error::Format(rc_zip::error::FormatError::InvalidLocalHeader))?;
-    tracing::debug!(name: "find_entry_compressed_data", ?header);
+    // name_len and extra_len fields are at position 26 and 28 of the header
+    let name_len = u16::from_le_bytes([header[26], header[27]]);
+    let extra_len = u16::from_le_bytes([header[28], header[29]]);
+    tracing::debug!(name: "find_entry_compressed_data", ?name_len, ?extra_len);
 
     Ok((
-        offset + 30 + header.name.len() as u64 + header.extra.len() as u64,
+        offset + 30 + u64::from(name_len) + u64::from(extra_len),
         buf,
     ))
 }
