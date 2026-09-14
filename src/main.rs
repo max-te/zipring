@@ -268,6 +268,11 @@ async fn serve(
                 break;
             }
         };
+        if let Err(e) = stream_write.flush().await {
+            tracing::error!("error responding: {:?}", e);
+            return_buf(&buf_pool, buf);
+            break;
+        }
         if !keep_alive {
             tracing::info!("closing connection on request");
             return_buf(&buf_pool, buf);
