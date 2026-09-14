@@ -248,7 +248,10 @@ fn test_pipelined_requests() {
         loop {
             let mut line = String::new();
             let read = reader.read_line(&mut line).expect("header read failed");
-            assert!(read != 0, "connection closed before the {expected} response");
+            assert!(
+                read != 0,
+                "connection closed before the {expected} response"
+            );
             let line = line.trim_end_matches("\r\n");
             if line.is_empty() {
                 break;

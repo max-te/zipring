@@ -185,7 +185,8 @@ impl Server {
     /// CPU seconds the server has burned so far, summed over all its threads.
     fn cpu_seconds(&self) -> f64 {
         let pid = self.process.id();
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("server should live");
+        let stat =
+            std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("server should live");
         // The comm field may contain spaces; everything after the last ')' is fixed-width.
         let fields: Vec<&str> = stat[stat.rfind(')').expect("stat has a comm field")..]
             .split_whitespace()
@@ -224,7 +225,9 @@ struct Client {
 impl Client {
     fn connect(addr: SocketAddr, scenario: &Scenario) -> Client {
         let stream = TcpStream::connect(addr).expect("server should accept");
-        stream.set_nodelay(true).expect("nodelay should be settable");
+        stream
+            .set_nodelay(true)
+            .expect("nodelay should be settable");
         let reader = BufReader::new(stream.try_clone().expect("stream should clone"));
         let request = format!(
             "GET {} HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: {}\r\n\r\n",
@@ -258,7 +261,10 @@ impl Client {
         let mut chunked = false;
         loop {
             let mut line = String::new();
-            let read = self.reader.read_line(&mut line).expect("header is readable");
+            let read = self
+                .reader
+                .read_line(&mut line)
+                .expect("header is readable");
             assert!(read != 0, "server closed the connection mid-response");
             let line = line.trim_end_matches("\r\n");
             if line.is_empty() {
@@ -277,7 +283,9 @@ impl Client {
         } else if chunked {
             loop {
                 let mut line = String::new();
-                self.reader.read_line(&mut line).expect("chunk size readable");
+                self.reader
+                    .read_line(&mut line)
+                    .expect("chunk size readable");
                 let size = usize::from_str_radix(line.trim_end_matches("\r\n"), 16)
                     .expect("chunk size should be hex");
                 if size == 0 {
