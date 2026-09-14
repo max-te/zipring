@@ -80,7 +80,9 @@ pub async fn find_entry_compressed_data<B: IoBuf + IoBufMut>(
     // https://en.wikipedia.org/wiki/ZIP_(file_format)#Local_file_header
     let mut cursor = 0;
     while cursor < 30 {
-        let BufResult(res, slice) = file.read_at(buf.slice(cursor..30), offset).await;
+        let BufResult(res, slice) = file
+            .read_at(buf.slice(cursor..30), offset + (cursor as u64))
+            .await;
         buf = slice.into_inner();
         let n = res?;
         if n == 0 {
