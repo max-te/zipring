@@ -10,8 +10,10 @@
 //!   * [rc-zip-tokio](https://crates.io/crates/rc-zip-tokio) for using tokio traits
 
 use crate::borrowed_file::BorrowedFile;
-use monoio::buf::IoBuf;
-use monoio::{buf::IoBufMut, fs::File};
+use compio::BufResult;
+use compio::buf::{IntoInner, IoBuf, IoBufMut};
+use compio::fs::File;
+use compio::io::AsyncReadAt;
 use rc_zip::parse::Method;
 use rc_zip::{
     error::Error,
@@ -46,9 +48,9 @@ pub async fn read_zip_from_file(file: &File) -> Result<Archive, Error> {
         if let Some(offset) = fsm.wants_read() {
             let dst = fsm.space();
             let max_read = dst.len().min(buf.len());
-            let slice = IoBufMut::slice_mut(buf, 0..max_read);
+            let slice = buf.slice(0..max_read);
 
-            let (res, slice) = file.read_at(slice, offset).await;
+            let BufResult(res, slice) = file.read_at(slice, offset).await;
             let n = res?;
             (dst[..n]).copy_from_slice(&slice[..n]);
 
@@ -78,9 +80,7 @@ pub async fn find_entry_compressed_data<B: IoBuf + IoBufMut>(
     // https://en.wikipedia.org/wiki/ZIP_(file_format)#Local_file_header
     let mut cursor = 0;
     while cursor < 30 {
-        let (res, slice) = file
-            .read_at(IoBufMut::slice_mut(buf, cursor..30), offset)
-            .await;
+        let BufResult(res, slice) = file.read_at(buf.slice(cursor..30), offset).await;
         buf = slice.into_inner();
         let n = res?;
         if n == 0 {
@@ -91,7 +91,7 @@ pub async fn find_entry_compressed_data<B: IoBuf + IoBufMut>(
         }
         cursor += n;
     }
-    let header = buf.as_slice();
+    let header = buf.as_init();
 
     // name_len and extra_len fields are at position 26 and 28 of the header
     let name_len = u16::from_le_bytes([header[26], header[27]]);

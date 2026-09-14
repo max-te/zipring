@@ -4,17 +4,17 @@ mod rc_zip_monoio;
 mod request;
 pub(crate) mod response;
 
+use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZero;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
+use compio::driver::ProactorBuilder;
+use compio::fs::File;
+use compio::io::AsyncWrite;
+use compio::net::{TcpSocket, TcpStream};
 use miette::{IntoDiagnostic, Result, WrapErr};
-use monoio::IoUringDriver;
-use monoio::fs::File;
-use monoio::io::{AsyncWriteRent, Splitable};
-use monoio::net::{TcpListener, TcpStream};
-use monoio::time::TimeDriver;
 use tracing::Instrument;
 
 use crate::borrowed_file::{BorrowedFile, FdBorrowToken, FdOwner};
@@ -70,20 +70,14 @@ impl UringFlags {
 }
 
 /// Build a runtime for the calling thread, which then owns its ring.
-fn build_runtime(flags: UringFlags) -> Result<monoio::Runtime<TimeDriver<IoUringDriver>>> {
-    let mut urb = monoio::IoUring::builder();
-    if flags.single_issuer {
-        urb.setup_single_issuer();
-    }
-    if flags.coop_taskrun {
-        urb.setup_coop_taskrun();
-    }
-    if flags.defer_taskrun {
-        urb.setup_defer_taskrun();
-    }
-    monoio::RuntimeBuilder::<IoUringDriver>::new()
-        .enable_all()
-        .uring_builder(urb)
+fn build_runtime(flags: UringFlags) -> Result<compio::runtime::Runtime> {
+    let mut proactor = ProactorBuilder::new();
+    proactor
+        .single_issuer(flags.single_issuer)
+        .coop_taskrun(flags.coop_taskrun)
+        .defer_taskrun(flags.defer_taskrun);
+    compio::runtime::Runtime::builder()
+        .with_proactor(proactor)
         .build()
         .into_diagnostic()
         .wrap_err("should be able to start runtime")
@@ -127,7 +121,7 @@ fn main() -> Result<()> {
         .map(|i| {
             let token = file_holder.token();
             std::thread::spawn(move || -> Result<Never> {
-                let mut rt = build_runtime(uring_flags)?;
+                let rt = build_runtime(uring_flags)?;
                 rt.block_on(inner_main(i, token, port, tree))
             })
         })
@@ -156,7 +150,7 @@ fn read_zip_tree(
     uring_flags: UringFlags,
 ) -> Result<(File, FsTreeNode), miette::Error> {
     build_runtime(uring_flags)?.block_on(async {
-        let file = monoio::fs::File::open(filepath)
+        let file = compio::fs::File::open(filepath)
             .await
             .into_diagnostic()
             .wrap_err_with(|| format!("could not open {}", filepath.display()))?;
@@ -181,15 +175,35 @@ async fn inner_main(
     tree: &'static FsTreeNode,
 ) -> Result<Never> {
     let file: Rc<BorrowedFile<'static>> = Rc::new(file_token.to_borrowed_file());
-    let addr = format!("127.0.0.1:{port}");
-    let listener = TcpListener::bind(&addr)
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let socket = TcpSocket::new_v4()
+        .await
+        .into_diagnostic()
+        .wrap_err("could not create socket")?;
+    // Every thread binds the same address, so the kernel load-balances accepts across
+    // the rings instead of one thread handing connections to the others.
+    socket
+        .set_reuseport(true)
+        .and_then(|()| socket.set_reuseaddr(true))
+        .and_then(|()| socket.set_keepalive(true))
+        .into_diagnostic()
+        .wrap_err("could not set socket options")?;
+    socket
+        .bind(addr)
+        .await
         .into_diagnostic()
         .wrap_err_with(|| format!("could not bind to {addr}"))?;
+    let local_addr = socket
+        .local_addr()
+        .into_diagnostic()
+        .wrap_err("bound socket should have an address")?;
+    let listener = socket
+        .listen(128)
+        .await
+        .into_diagnostic()
+        .wrap_err_with(|| format!("could not listen on {addr}"))?;
     if threadid == 0 {
-        tracing::info!(
-            "Serving file at http://{}",
-            listener.local_addr().expect("should have an adress")
-        );
+        tracing::info!("Serving file at http://{}", local_addr);
     }
     let mut conid = 0usize;
     loop {
@@ -200,7 +214,10 @@ async fn inner_main(
                     tracing::info_span!("connection", thread = threadid, conid = conid).entered();
                 tracing::info!("accepted a connection from {}", addr);
                 let _ = stream.set_nodelay(true);
-                monoio::spawn(serve(stream, file.clone(), tree).instrument(span.exit()));
+                let handle = compio::runtime::spawn(
+                    serve(stream, file.clone(), tree).instrument(span.exit()),
+                );
+                handle.detach();
             }
             Err(e) => {
                 tracing::error!(?threadid, "accepting connection failed: {}", e);
@@ -211,7 +228,7 @@ async fn inner_main(
 }
 
 async fn serve(stream: TcpStream, file: Rc<BorrowedFile<'_>>, tree: &FsTreeNode) {
-    let (mut stream_read, mut stream_write) = stream.into_split();
+    let (mut stream_read, mut stream_write) = stream.split();
 
     let mut reader = RequestReader::new();
     let mut buf = vec![0u8; CONNECTION_BUF_SIZE].into_boxed_slice();
@@ -229,12 +246,8 @@ async fn serve(stream: TcpStream, file: Rc<BorrowedFile<'_>>, tree: &FsTreeNode)
             break;
         }
     }
-    if let Ok(mut stream) = stream_read.reunite(stream_write) {
-        if let Err(e) = stream.shutdown().await {
-            tracing::error!("shutdown failed: {:?}", e);
-        }
-    } else {
-        tracing::error!("reunite failed");
+    if let Err(e) = stream_write.shutdown().await {
+        tracing::error!("shutdown failed: {:?}", e);
     }
     tracing::info!("finished serving connection");
 }

@@ -10,8 +10,9 @@
 use std::mem::ManuallyDrop;
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 
-use monoio::BufResult;
-use monoio::buf::IoBufMut;
+use compio::BufResult;
+use compio::buf::IoBufMut;
+use compio::io::AsyncReadAt;
 
 /// Owns an open file descriptor and guarantees it stays open.
 ///
@@ -40,7 +41,7 @@ impl FdOwner {
     /// The original `File` is consumed (forgotten) — the fd is only closed
     /// when this `FdOwner` is dropped (typically at process exit).
     #[inline]
-    pub fn from(file: monoio::fs::File) -> Self {
+    pub fn from(file: compio::fs::File) -> Self {
         let fd = file.as_raw_fd();
         std::mem::forget(file);
         Self { fd }
@@ -101,7 +102,7 @@ impl<'a> FdBorrowToken<'a> {
 /// will use it, because [`monoio::fs::File`] is `!Send`.
 #[derive(Debug)]
 pub struct BorrowedFile<'a> {
-    inner: ManuallyDrop<monoio::fs::File>,
+    inner: ManuallyDrop<compio::fs::File>,
     _marker: std::marker::PhantomData<&'a ()>,
 }
 
@@ -116,11 +117,7 @@ impl BorrowedFile<'_> {
     #[inline]
     unsafe fn from_raw_fd(raw_fd: RawFd) -> Self {
         // SAFETY: caller guarantees fd is valid and remains open.
-        let std_file = unsafe { std::fs::File::from_raw_fd(raw_fd) };
-        // from_std calls std_file.into_raw_fd() — it consumes the std::fs::File
-        // without closing, then stores the fd in a new SharedFd.
-        let file = monoio::fs::File::from_std(std_file)
-            .expect("from_std only fails when the underlying handle is a Windows handle");
+        let file = unsafe { compio::fs::File::from_raw_fd(raw_fd) };
         Self {
             inner: ManuallyDrop::new(file),
             _marker: std::marker::PhantomData,

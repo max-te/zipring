@@ -1,6 +1,6 @@
-use monoio::BufResult;
-use monoio::buf::{IoBuf, IoVecBuf};
-use monoio::io::AsyncWriteRent;
+use compio::BufResult;
+use compio::buf::{IoBuf, IoVectoredBuf};
+use compio::io::AsyncWrite;
 use rc_zip::parse::{Entry, Method as ZipMethod, Mode, Version};
 
 use super::stream::*;
@@ -9,11 +9,7 @@ use crate::fstree::FsTreeNode;
 use crate::response::status::HttpStatus;
 
 fn run(future: impl Future) {
-    monoio::RuntimeBuilder::<monoio::IoUringDriver>::new()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(future);
+    compio::runtime::Runtime::new().unwrap().block_on(future);
 }
 
 #[test]
@@ -156,7 +152,7 @@ fn test_serve_index_root() {
 }
 
 /// A test writer that captures all bytes written to it.
-/// Implements `AsyncWriteRent` so it can be used with `ResponseStream`.
+/// Implements `AsyncWrite` so it can be used with `ResponseStream`.
 struct TestWriter {
     written: Vec<u8>,
 }
@@ -169,21 +165,15 @@ impl TestWriter {
     }
 }
 
-impl AsyncWriteRent for TestWriter {
+impl AsyncWrite for TestWriter {
     async fn write<T: IoBuf>(&mut self, buf: T) -> BufResult<usize, T> {
-        let len = buf.bytes_init();
-
-        let data = {
-            let ptr = buf.read_ptr();
-            // SAFETY: IoBuf contract guarantees `bytes_init()` bytes are initialized.
-            // The buffer is `'static` so the pointer is valid for the duration of this call.
-            unsafe { std::slice::from_raw_parts(ptr, len) }
-        };
+        let data = buf.as_init();
         self.written.extend_from_slice(data);
-        (Ok(len), buf)
+        let len = data.len();
+        BufResult(Ok(len), buf)
     }
 
-    async fn writev<T: IoVecBuf>(&mut self, _buf_vec: T) -> BufResult<usize, T> {
+    async fn write_vectored<T: IoVectoredBuf>(&mut self, _buf_vec: T) -> BufResult<usize, T> {
         unimplemented!()
     }
 

@@ -1,9 +1,8 @@
 use std::fmt::Debug;
 
-use monoio::{
-    buf::{IoBufMut, SliceMut},
-    io::AsyncReadRent,
-};
+use compio::BufResult;
+use compio::buf::{IntoInner, IoBuf, Slice};
+use compio::io::AsyncReadExt;
 
 use crate::{Buf, response::status::HttpStatus};
 
@@ -24,14 +23,8 @@ impl AcceptedEncodings {
 }
 
 pub enum Request {
-    Get {
-        path: SliceMut<Buf>,
-        headers: Headers,
-    },
-    Bad {
-        status: HttpStatus,
-        buf: Buf,
-    },
+    Get { path: Slice<Buf>, headers: Headers },
+    Bad { status: HttpStatus, buf: Buf },
 }
 
 impl Request {
@@ -118,7 +111,7 @@ impl RequestReader {
     /// The decoded path is copied into `response_buf`, which the returned request
     /// carries onwards -- so nothing the caller holds refers to this reader's bytes,
     /// and the next request may sit here untouched while this one is answered.
-    pub async fn next_request<R: AsyncReadRent>(
+    pub async fn next_request<R: AsyncReadExt>(
         &mut self,
         stream: &mut R,
         response_buf: Buf,
@@ -198,7 +191,7 @@ impl RequestReader {
     }
 
     /// Read once, making room first if the buffer has none left.
-    async fn fill<R: AsyncReadRent>(&mut self, stream: &mut R) -> Fill {
+    async fn fill<R: AsyncReadExt>(&mut self, stream: &mut R) -> Fill {
         let capacity = self.buf.len();
         if self.filled == capacity {
             if self.consumed == 0 {
@@ -210,9 +203,7 @@ impl RequestReader {
         }
 
         let buf = std::mem::take(&mut self.buf);
-        let mut slice = IoBufMut::slice_mut(buf, self.filled..capacity);
-        let res;
-        (res, slice) = stream.read(slice).await;
+        let BufResult(res, slice) = stream.read(buf.slice(self.filled..capacity)).await;
         self.buf = slice.into_inner();
 
         match res {
@@ -298,7 +289,7 @@ fn extract_headers(parsed_headers: &mut [httparse::Header<'_>]) -> Headers {
 
 /// Percent-decode the raw path into the front of `buf`, which the response is built
 /// over once the path has served its purpose.
-fn decode_path(raw: &[u8], mut buf: Buf) -> Result<SliceMut<Buf>, Buf> {
+fn decode_path(raw: &[u8], mut buf: Buf) -> Result<Slice<Buf>, Buf> {
     let mut len = 0;
     for byte in percent_encoding::percent_decode(raw) {
         if len == buf.len() {
@@ -308,7 +299,7 @@ fn decode_path(raw: &[u8], mut buf: Buf) -> Result<SliceMut<Buf>, Buf> {
         buf[len] = byte;
         len += 1;
     }
-    Ok(IoBufMut::slice_mut(buf, 0..len))
+    Ok(buf.slice(..len))
 }
 
 #[cfg(test)]

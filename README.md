@@ -9,7 +9,7 @@ I built this, because I got tired of extracting all my test pipeline artifact zi
 - Zero-copy serving of compressed content
 - Directory listings
 - Automatic MIME type detection
-- Multi-threaded with io_uring-based async runtime (monoio)
+- Multi-threaded with io_uring-based async runtime (compio)
 - Artisanally hand-assembled HTTP responses
 
 ## Usage

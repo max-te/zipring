@@ -1,6 +1,6 @@
-use monoio::buf::{IoBufMut, IoVecBufMut};
-use monoio::io::AsyncReadRent;
-use monoio::{BufResult, IoUringDriver};
+use compio::BufResult;
+use compio::buf::{IoBufMut, IoVectoredBufMut};
+use compio::io::AsyncRead;
 
 use super::*;
 use crate::response::status::HttpStatus;
@@ -18,20 +18,21 @@ impl TestReader {
     }
 }
 
-impl AsyncReadRent for TestReader {
+impl AsyncRead for TestReader {
     async fn read<T: IoBufMut>(&mut self, mut buf: T) -> BufResult<usize, T> {
         let remaining = self.data.len() - self.pos;
-        let amt = std::cmp::min(remaining, buf.bytes_total());
+        let amt = std::cmp::min(remaining, buf.buf_capacity());
         unsafe {
-            buf.write_ptr()
+            buf.buf_mut_ptr()
+                .cast::<u8>()
                 .copy_from_nonoverlapping(self.data.as_ptr().add(self.pos), amt);
-            buf.set_init(amt);
+            buf.set_len(amt);
         }
         self.pos += amt;
-        (Ok(amt), buf)
+        BufResult(Ok(amt), buf)
     }
 
-    async fn readv<T: IoVecBufMut>(&mut self, _buf: T) -> BufResult<usize, T> {
+    async fn read_vectored<T: IoVectoredBufMut>(&mut self, _buf: T) -> BufResult<usize, T> {
         unimplemented!()
     }
 }
@@ -50,34 +51,35 @@ impl SegmentedReader {
     }
 }
 
-impl AsyncReadRent for SegmentedReader {
+impl AsyncRead for SegmentedReader {
     async fn read<T: IoBufMut>(&mut self, mut buf: T) -> BufResult<usize, T> {
         let Some(segment) = self.segments.pop_front() else {
-            return (Ok(0), buf);
+            return BufResult(Ok(0), buf);
         };
-        let amt = segment.len().min(buf.bytes_total());
+        let amt = segment.len().min(buf.buf_capacity());
         unsafe {
-            buf.write_ptr()
+            buf.buf_mut_ptr()
+                .cast::<u8>()
                 .copy_from_nonoverlapping(segment.as_ptr(), amt);
-            buf.set_init(amt);
+            buf.set_len(amt);
         }
-        (Ok(amt), buf)
+        BufResult(Ok(amt), buf)
     }
 
-    async fn readv<T: IoVecBufMut>(&mut self, _buf: T) -> BufResult<usize, T> {
+    async fn read_vectored<T: IoVectoredBufMut>(&mut self, _buf: T) -> BufResult<usize, T> {
         unimplemented!()
     }
 }
 
 struct ErrorReader;
 
-impl AsyncReadRent for ErrorReader {
+impl AsyncRead for ErrorReader {
     async fn read<T: IoBufMut>(&mut self, buf: T) -> BufResult<usize, T> {
-        (Err(std::io::ErrorKind::ConnectionReset.into()), buf)
+        BufResult(Err(std::io::ErrorKind::ConnectionReset.into()), buf)
     }
 
-    async fn readv<T: IoVecBufMut>(&mut self, buf: T) -> BufResult<usize, T> {
-        (Err(std::io::ErrorKind::ConnectionReset.into()), buf)
+    async fn read_vectored<T: IoVectoredBufMut>(&mut self, buf: T) -> BufResult<usize, T> {
+        BufResult(Err(std::io::ErrorKind::ConnectionReset.into()), buf)
     }
 }
 
@@ -87,17 +89,13 @@ fn make_buf(size: usize) -> Buf {
 
 /// Parse a single request from a fresh reader, for the cases where the connection's
 /// history does not matter.
-async fn parse_one(stream: &mut impl AsyncReadRent, response_buf: Buf) -> Result<Request, Buf> {
+async fn parse_one(stream: &mut impl AsyncRead, response_buf: Buf) -> Result<Request, Buf> {
     let mut reader = RequestReader::new();
     reader.next_request(stream, response_buf).await
 }
 
 fn run(future: impl Future) {
-    monoio::RuntimeBuilder::<IoUringDriver>::new()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(future);
+    compio::runtime::Runtime::new().unwrap().block_on(future);
 }
 
 #[test]

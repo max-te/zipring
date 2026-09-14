@@ -1,10 +1,9 @@
 use std::io::{Cursor, Write};
 
 use crate::borrowed_file::BorrowedFile;
-use monoio::{
-    buf::IoBufMut,
-    io::{AsyncWriteRent, AsyncWriteRentExt},
-};
+use compio::BufResult;
+use compio::buf::{IntoInner, IoBuf};
+use compio::io::AsyncWriteExt;
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use rc_zip::{Entry, fsm::EntryFsm, parse::Method as CompressionMethod};
 
@@ -26,7 +25,7 @@ const HTTP_CHUNK_TERMINATOR: &[u8] = b"0\r\n\r\n";
 /// `buf[..prefix]` -- the response header, on the first chunk -- leaves in the same write.
 ///
 /// The final chunk carries the terminator along with it.
-async fn flush_chunk<W: AsyncWriteRent>(
+async fn flush_chunk<W: AsyncWriteExt>(
     stream: &mut W,
     mut buf: Buf,
     prefix: usize,
@@ -51,9 +50,7 @@ async fn flush_chunk<W: AsyncWriteRent>(
         end += HTTP_CHUNK_TERMINATOR.len();
     }
 
-    let mut slice = IoBufMut::slice_mut(buf, 0..end);
-    let res;
-    (res, slice) = stream.write_all(slice).await;
+    let BufResult(res, slice) = stream.write_all(buf.slice(..end)).await;
     res?;
     Ok(slice.into_inner())
 }
@@ -120,12 +117,12 @@ const fn chunk_limit(buflen: usize) -> usize {
 const URI_FRAGMENT_ENCODING_SET: &AsciiSet =
     &CONTROLS.add(b' ').add(b'"').add(b'<').add(b'>').add(b'`');
 
-pub struct ResponseStream<'w, W: AsyncWriteRent> {
+pub struct ResponseStream<'w, W: AsyncWriteExt> {
     stream: &'w mut W,
     buf: Buf,
 }
 
-impl<'w, W: AsyncWriteRent> ResponseStream<'w, W> {
+impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
     pub fn new(stream: &'w mut W, buf: Buf) -> Self {
         Self { stream, buf }
     }
@@ -153,9 +150,8 @@ impl<'w, W: AsyncWriteRent> ResponseStream<'w, W> {
 
         let mut len =
             usize::try_from(entry.compressed_size).expect("entry size should fit into usize");
-        let mut offset;
-        let mut scratch = IoBufMut::slice_mut(buf, prefix_len..);
-        (offset, scratch) = find_entry_compressed_data(file, entry, scratch).await?;
+        let (mut offset, scratch) =
+            find_entry_compressed_data(file, entry, buf.slice(prefix_len..)).await?;
         buf = scratch.into_inner();
         tracing::debug!("found compressed data");
 
@@ -163,11 +159,8 @@ impl<'w, W: AsyncWriteRent> ResponseStream<'w, W> {
             // Leaving room for the trailer lets a body that just fits still ship in one write.
             let room = buf.len() - prefix_len - GZIP_TRAILER_LEN;
             let bytes_to_read = len.min(room);
-            let (res, slice) = file
-                .read_at(
-                    IoBufMut::slice_mut(buf, prefix_len..prefix_len + bytes_to_read),
-                    offset,
-                )
+            let BufResult(res, slice) = file
+                .read_at(buf.slice(prefix_len..prefix_len + bytes_to_read), offset)
                 .await;
             let n = res?;
             buf = slice.into_inner();
@@ -185,8 +178,7 @@ impl<'w, W: AsyncWriteRent> ResponseStream<'w, W> {
                 buf[end..end + GZIP_TRAILER_LEN].copy_from_slice(&gzip_trailer);
                 end += GZIP_TRAILER_LEN;
             }
-            let slice = IoBufMut::slice_mut(buf, 0..end);
-            let (res, slice) = self.stream.write_all(slice).await;
+            let BufResult(res, slice) = self.stream.write_all(buf.slice(..end)).await;
             res?;
             buf = slice.into_inner();
 
@@ -206,7 +198,6 @@ impl<'w, W: AsyncWriteRent> ResponseStream<'w, W> {
         head_len: usize,
     ) -> std::io::Result<Self> {
         let mut buf = self.buf;
-        let mut res;
         let mut offset = entry.header_offset;
         let mut prefix_len = head_len;
         let mut fsm = EntryFsm::new(None, None);
@@ -214,8 +205,8 @@ impl<'w, W: AsyncWriteRent> ResponseStream<'w, W> {
             if fsm.wants_read() {
                 let dst = fsm.space();
                 let max_read = dst.len().min(buf.len() - prefix_len);
-                let mut slice = IoBufMut::slice_mut(buf, prefix_len..prefix_len + max_read);
-                (res, slice) = file.read_at(slice, offset).await;
+                let slice = buf.slice(prefix_len..prefix_len + max_read);
+                let BufResult(res, slice) = file.read_at(slice, offset).await;
                 let n = res?;
                 (dst[..n]).copy_from_slice(&slice[..n]);
                 fsm.fill(n);
@@ -225,9 +216,10 @@ impl<'w, W: AsyncWriteRent> ResponseStream<'w, W> {
             fsm = match fsm.process(&mut buf[prefix_len..]) {
                 Ok(rc_zip::fsm::FsmResult::Continue((fsm, outcome))) => {
                     if outcome.bytes_written > 0 {
-                        let mut slice =
-                            IoBufMut::slice_mut(buf, 0..prefix_len + outcome.bytes_written);
-                        (res, slice) = self.stream.write_all(slice).await;
+                        let BufResult(res, slice) = self
+                            .stream
+                            .write_all(buf.slice(..prefix_len + outcome.bytes_written))
+                            .await;
                         res?;
                         buf = slice.into_inner();
                         prefix_len = 0;
@@ -243,8 +235,7 @@ impl<'w, W: AsyncWriteRent> ResponseStream<'w, W> {
         }
         if prefix_len > 0 {
             // An entry without any content still owes its header.
-            let mut slice = IoBufMut::slice_mut(buf, 0..prefix_len);
-            (res, slice) = self.stream.write_all(slice).await;
+            let BufResult(res, slice) = self.stream.write_all(buf.slice(..prefix_len)).await;
             res?;
             buf = slice.into_inner();
         }
@@ -417,8 +408,10 @@ impl<'w, W: AsyncWriteRent> ResponseStream<'w, W> {
         let etag = encode_crc32(crc32);
         buf[CRC_OFFSET..{ CRC_OFFSET + etag.len() }].copy_from_slice(&etag);
 
-        let slice = IoBufMut::slice_mut(buf, 0..NOT_MODIFIED_TEMPLATE.len());
-        let (res, slice) = self.stream.write_all(slice).await;
+        let BufResult(res, slice) = self
+            .stream
+            .write_all(buf.slice(..NOT_MODIFIED_TEMPLATE.len()))
+            .await;
         self.buf = slice.into_inner();
         res?;
         Ok(self)
@@ -431,9 +424,8 @@ impl<'w, W: AsyncWriteRent> ResponseStream<'w, W> {
         Write::write_all(&mut cur, b"\r\nContent-Length: 0\r\n\r\n")?;
         let len = usize::try_from(cur.position()).expect("status should be adressable with usize");
 
-        let mut slice = IoBufMut::slice_mut(cur.into_inner(), 0..len);
-        let res;
-        (res, slice) = self.stream.write_all(slice).await;
+        let slice = cur.into_inner().slice(0..len);
+        let BufResult(res, slice) = self.stream.write_all(slice).await;
         self.buf = slice.into_inner();
         res?;
         Ok(self)
