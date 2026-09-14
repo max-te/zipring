@@ -4,6 +4,7 @@ mod rc_zip_monoio;
 mod request;
 pub(crate) mod response;
 
+use std::cell::RefCell;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZero;
 use std::path::PathBuf;
@@ -27,6 +28,19 @@ type Buf = Box<[u8]>;
 /// Per-connection response buffer: holds the decoded path, then each
 /// response chunk. Sized so that typical entries are served in a single write.
 const CONNECTION_BUF_SIZE: usize = 64 * 1024;
+
+type BufPool = Rc<RefCell<Vec<Buf>>>;
+
+fn take_buf(pool: &BufPool) -> Buf {
+    pool.borrow_mut()
+        .pop()
+        .unwrap_or_else(|| vec![0u8; CONNECTION_BUF_SIZE].into_boxed_slice())
+}
+
+fn return_buf(pool: &BufPool, buf: Buf) {
+    assert_eq!(buf.len(), CONNECTION_BUF_SIZE);
+    pool.borrow_mut().push(buf);
+}
 
 #[derive(Debug)]
 enum Never {}
@@ -175,6 +189,7 @@ async fn inner_main(
     tree: &'static FsTreeNode,
 ) -> Result<Never> {
     let file: Rc<BorrowedFile<'static>> = Rc::new(file_token.to_borrowed_file());
+    let buf_pool: BufPool = Rc::new(RefCell::new(Vec::new()));
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let socket = TcpSocket::new_v4()
         .await
@@ -215,7 +230,7 @@ async fn inner_main(
                 tracing::info!("accepted a connection from {}", addr);
                 let _ = stream.set_nodelay(true);
                 let handle = compio::runtime::spawn(
-                    serve(stream, file.clone(), tree).instrument(span.exit()),
+                    serve(stream, file.clone(), tree, buf_pool.clone()).instrument(span.exit()),
                 );
                 handle.detach();
             }
@@ -227,22 +242,35 @@ async fn inner_main(
     }
 }
 
-async fn serve(stream: TcpStream, file: Rc<BorrowedFile<'_>>, tree: &FsTreeNode) {
+async fn serve(
+    stream: TcpStream,
+    file: Rc<BorrowedFile<'_>>,
+    tree: &FsTreeNode,
+    buf_pool: BufPool,
+) {
     let (mut stream_read, mut stream_write) = stream.split();
 
     let mut reader = RequestReader::new();
-    let mut buf = vec![0u8; CONNECTION_BUF_SIZE].into_boxed_slice();
+    let mut buf = take_buf(&buf_pool);
     loop {
-        let Ok(request) = reader.next_request(&mut stream_read, buf).await else {
-            break;
+        let request = match reader.next_request(&mut stream_read, buf).await {
+            Ok(request) => request,
+            Err(buf) => {
+                return_buf(&buf_pool, buf);
+                break;
+            }
         };
         let keep_alive = request.keep_alive();
-        let Ok(r_buf) = respond(request, &file, tree, &mut stream_write).await else {
-            break;
+        buf = match respond(request, &file, tree, &mut stream_write).await {
+            Ok(buf) => buf,
+            Err(e) => {
+                tracing::error!("error responding: {:?}", e);
+                break;
+            }
         };
-        buf = r_buf;
         if !keep_alive {
             tracing::info!("closing connection on request");
+            return_buf(&buf_pool, buf);
             break;
         }
     }
