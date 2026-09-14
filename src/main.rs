@@ -1,5 +1,5 @@
 mod fstree;
-mod rc_zip_monoio;
+mod rc_zip_compio;
 mod request;
 pub(crate) mod response;
 
@@ -183,7 +183,7 @@ fn read_zip_tree(file: &std::fs::File, uring_flags: UringFlags) -> Result<FsTree
     let file = dup(file)?;
     build_runtime(uring_flags)?.block_on(async {
         let file = into_compio(file);
-        let zip = rc_zip_monoio::read_zip_from_file(&file)
+        let zip = rc_zip_compio::read_zip_from_file(&file)
             .await
             .into_diagnostic()
             .wrap_err("could not parse zip")?;

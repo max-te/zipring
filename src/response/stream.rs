@@ -10,7 +10,7 @@ use rc_zip::{Entry, fsm::EntryFsm, parse::Method as CompressionMethod};
 use crate::{
     Buf,
     fstree::FsTreeNode,
-    rc_zip_monoio::{find_entry_compressed_data, is_method_supported},
+    rc_zip_compio::{find_entry_compressed_data, is_method_supported},
     request::AcceptedEncodings,
     response::status::HttpStatus,
 };
