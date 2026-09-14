@@ -1,4 +1,3 @@
-mod borrowed_file;
 mod fstree;
 mod rc_zip_monoio;
 mod request;
@@ -7,6 +6,7 @@ pub(crate) mod response;
 use std::cell::RefCell;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZero;
+use std::os::fd::{FromRawFd, IntoRawFd};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -18,7 +18,6 @@ use compio::net::{TcpSocket, TcpStream};
 use miette::{IntoDiagnostic, Result, WrapErr};
 use tracing::Instrument;
 
-use crate::borrowed_file::{BorrowedFile, FdBorrowToken, FdOwner};
 use crate::fstree::FsTreeNode;
 use crate::request::RequestReader;
 use crate::response::respond;
@@ -128,18 +127,19 @@ fn main() -> Result<()> {
 
     let uring_flags = UringFlags::from_env()?;
 
-    let (file, tree) = read_zip_tree(&filepath, uring_flags)?;
-    let tree: &'static FsTreeNode = Box::leak(Box::new(tree));
-    let file_holder = Box::leak(Box::new(FdOwner::from(file)));
+    let file = std::fs::File::open(&filepath)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("could not open {}", filepath.display()))?;
+    let tree: &'static FsTreeNode = Box::leak(Box::new(read_zip_tree(&file, uring_flags)?));
     let mut threads: Vec<_> = (0..n_threads)
         .map(|i| {
-            let token = file_holder.token();
-            std::thread::spawn(move || -> Result<Never> {
+            let file = dup(&file)?;
+            Ok(std::thread::spawn(move || -> Result<Never> {
                 let rt = build_runtime(uring_flags)?;
-                rt.block_on(inner_main(i, token, port, tree))
-            })
+                rt.block_on(inner_main(i, into_compio(file), port, tree))
+            }))
         })
-        .collect();
+        .collect::<Result<_>>()?;
 
     loop {
         if let Some(finished) = threads.extract_if(.., |t| t.is_finished()).next() {
@@ -159,15 +159,30 @@ fn main() -> Result<()> {
     }
 }
 
-fn read_zip_tree(
-    filepath: &PathBuf,
-    uring_flags: UringFlags,
-) -> Result<(File, FsTreeNode), miette::Error> {
+/// Duplicate the zip's fd so another thread can own a handle to it.
+///
+/// The dup shares one file description, so every thread reads the same bytes.
+fn dup(file: &std::fs::File) -> Result<std::fs::File> {
+    file.try_clone()
+        .into_diagnostic()
+        .wrap_err("could not duplicate zip file descriptor")
+}
+
+/// Turn an owned fd into a compio handle for the runtime that will read from it.
+///
+/// Each thread builds its own handle because compio's files are `!Send` -- their
+/// shared-fd refcount is an `Rc` unless the `sync` feature is on -- so the fd
+/// travels between threads as a [`std::fs::File`] instead.
+fn into_compio(file: std::fs::File) -> File {
+    // SAFETY: `file` owns this fd and gives it up here; the returned handle is the
+    // sole owner and closes it on drop.
+    unsafe { File::from_raw_fd(file.into_raw_fd()) }
+}
+
+fn read_zip_tree(file: &std::fs::File, uring_flags: UringFlags) -> Result<FsTreeNode> {
+    let file = dup(file)?;
     build_runtime(uring_flags)?.block_on(async {
-        let file = compio::fs::File::open(filepath)
-            .await
-            .into_diagnostic()
-            .wrap_err_with(|| format!("could not open {}", filepath.display()))?;
+        let file = into_compio(file);
         let zip = rc_zip_monoio::read_zip_from_file(&file)
             .await
             .into_diagnostic()
@@ -178,17 +193,16 @@ fn read_zip_tree(
             tree.insert(entry.clone());
         }
         tree.recursive_sort();
-        Ok((file, tree))
+        Ok(tree)
     })
 }
 
 async fn inner_main(
     threadid: usize,
-    file_token: FdBorrowToken<'static>,
+    file: File,
     port: u16,
     tree: &'static FsTreeNode,
 ) -> Result<Never> {
-    let file: Rc<BorrowedFile<'static>> = Rc::new(file_token.to_borrowed_file());
     let buf_pool: BufPool = Rc::new(RefCell::new(Vec::new()));
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let socket = TcpSocket::new_v4()
@@ -242,12 +256,7 @@ async fn inner_main(
     }
 }
 
-async fn serve(
-    stream: TcpStream,
-    file: Rc<BorrowedFile<'_>>,
-    tree: &FsTreeNode,
-    buf_pool: BufPool,
-) {
+async fn serve(stream: TcpStream, file: File, tree: &FsTreeNode, buf_pool: BufPool) {
     let (mut stream_read, mut stream_write) = stream.split();
 
     let mut reader = RequestReader::new();

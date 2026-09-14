@@ -1,9 +1,9 @@
 use std::io::{Cursor, Write};
 
-use crate::borrowed_file::BorrowedFile;
 use compio::BufResult;
 use compio::buf::{IntoInner, IoBuf};
-use compio::io::AsyncWriteExt;
+use compio::fs::File;
+use compio::io::{AsyncReadAt, AsyncWriteExt};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use rc_zip::{Entry, fsm::EntryFsm, parse::Method as CompressionMethod};
 
@@ -132,7 +132,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
 
     async fn send_compressed_entry(
         mut self,
-        file: &BorrowedFile<'_>,
+        file: &File,
         entry: &Entry,
         head_len: usize,
     ) -> std::io::Result<Self> {
@@ -193,7 +193,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
     }
     async fn send_decompressed_entry(
         mut self,
-        file: &BorrowedFile<'_>,
+        file: &File,
         entry: &Entry,
         head_len: usize,
     ) -> std::io::Result<Self> {
@@ -338,7 +338,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
     #[tracing::instrument(skip_all, level = "debug")]
     async fn serve_entry(
         mut self,
-        file: &BorrowedFile<'_>,
+        file: &File,
         entry: &Entry,
         accepted_encodings: AcceptedEncodings,
     ) -> std::io::Result<Self> {
@@ -370,7 +370,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
 
     pub async fn serve_node(
         self,
-        file: &BorrowedFile<'_>,
+        file: &File,
         node: &FsTreeNode,
         accepted_encodings: AcceptedEncodings,
     ) -> std::io::Result<Self> {

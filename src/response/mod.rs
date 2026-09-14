@@ -1,8 +1,8 @@
-use crate::borrowed_file::BorrowedFile;
 use crate::fstree::FsTreeNode;
 use crate::request::Request;
 use crate::response::status::HttpStatus;
 use compio::buf::IntoInner;
+use compio::fs::File;
 use compio::io::AsyncWriteExt;
 use tracing::Instrument as _;
 use tracing::field;
@@ -17,7 +17,7 @@ mod test;
 
 pub async fn respond<W: AsyncWriteExt>(
     request: Request,
-    file: &BorrowedFile<'_>,
+    file: &File,
     tree: &FsTreeNode,
     stream: &mut W,
 ) -> std::io::Result<Buf> {

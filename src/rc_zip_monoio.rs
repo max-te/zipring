@@ -1,7 +1,7 @@
 //! This file is based on <https://github.com/bearcove/rc-zip/pull/92> by @fasterthanlime,
 //! vendored since they have no intentions of maintaining it.
 //!
-//! A library for reading zip files asynchronously using monoio I/O traits,
+//! A library for reading zip files asynchronously using compio I/O traits,
 //! based on top of [rc-zip](https://crates.io/crates/rc-zip).
 //!
 //! See also:
@@ -9,7 +9,6 @@
 //!   * [rc-zip-sync](https://crates.io/crates/rc-zip-sync) for using std I/O traits
 //!   * [rc-zip-tokio](https://crates.io/crates/rc-zip-tokio) for using tokio traits
 
-use crate::borrowed_file::BorrowedFile;
 use compio::BufResult;
 use compio::buf::{IntoInner, IoBuf, IoBufMut};
 use compio::fs::File;
@@ -71,7 +70,7 @@ pub async fn read_zip_from_file(file: &File) -> Result<Archive, Error> {
 /// as a scratch buffer. It must have at least 30 bytes of space.
 /// Returns the offset to the compressed file stream in `file`.
 pub async fn find_entry_compressed_data<B: IoBuf + IoBufMut>(
-    file: &BorrowedFile<'_>,
+    file: &File,
     entry: &Entry,
     buf: B,
 ) -> Result<(u64, B), Error> {
