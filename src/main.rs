@@ -54,13 +54,17 @@ struct UringFlags {
 }
 
 impl UringFlags {
+    fn from_env() -> Result<Self> {
+        match std::env::var("ZIPRING_URING_FLAGS") {
+            Ok(list) => Self::parse(&list),
+            Err(_) => Ok(Self::default()),
+        }
+    }
+
     /// Read the comma-separated flag list, rejecting names and combinations the
     /// kernel would only refuse later.
-    fn from_env() -> Result<Self> {
+    fn parse(list: &str) -> Result<Self> {
         let mut flags = Self::default();
-        let Ok(list) = std::env::var("ZIPRING_URING_FLAGS") else {
-            return Ok(flags);
-        };
         for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
             match name {
                 "single_issuer" => flags.single_issuer = true,
