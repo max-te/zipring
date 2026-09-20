@@ -359,6 +359,20 @@ fn test_request_nonexistent_file() {
     );
 }
 
+/// A requested path may be any bytes at all, multi-byte characters and invalid
+/// UTF-8 among them, and must be answered rather than dropped.
+#[test]
+fn test_request_path_that_is_not_ascii() {
+    let zip_path = PathBuf::from(TEST_FILE);
+    let server = start_server(zip_path);
+
+    for path in ["/%C3%A9/x", "/%FF", "/%FF/x", "/images/%FF"] {
+        let (headers, _body) =
+            make_request(&server, path, "gzip").unwrap_or_else(|e| panic!("{path}: {e}"));
+        assert!(headers.contains("404 Not Found"), "{path}: {headers}");
+    }
+}
+
 #[test]
 fn test_request_etag_caching() {
     let zip_path = PathBuf::from(TEST_FILE);

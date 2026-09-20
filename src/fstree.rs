@@ -42,7 +42,7 @@ impl<E: Clone> FsTreeNode<E> {
             panic!("Cannot insert into FsTreeNode::File")
         };
 
-        if let Some(separator) = path.chars().position(|c| c == '/') {
+        if let Some(separator) = path.find('/') {
             let mut head = path;
             let mut tail = head.split_off(separator);
 
@@ -120,7 +120,7 @@ impl<E: Clone> FsTreeNode<E> {
             return Some(self);
         }
 
-        let (head, tail) = match path.chars().position(|c| c == '/') {
+        let (head, tail) = match path.find('/') {
             Some(sep) => (&path[..sep], &path[sep + 1..]),
             None => (path, ""),
         };
@@ -172,6 +172,34 @@ mod tests {
             name: name.to_string(),
             entry: val,
         }
+    }
+
+    /// Entry names are only ASCII by convention; a zip may hold any UTF-8, and
+    /// `rc_zip` transcodes cp437 and shift-jis names into it.
+    #[test]
+    fn test_insert_and_find_non_ascii_path() {
+        let mut root = FsTreeNode::<i32>::root();
+        root.insert_at(1, "写真/東京タワー.txt".to_string());
+        root.insert_at(2, "日本語のファイル.txt".to_string());
+
+        assert_eq!(
+            *root.find("写真/東京タワー.txt").unwrap().entry().unwrap(),
+            1
+        );
+        assert_eq!(
+            *root.find("日本語のファイル.txt").unwrap().entry().unwrap(),
+            2
+        );
+        assert_eq!(root.find("写真").unwrap().name(), "写真");
+    }
+
+    /// A requested path is any UTF-8 the client cares to send, and must never
+    /// be split mid-character.
+    #[test]
+    fn test_find_non_ascii_path_that_is_absent() {
+        let root = FsTreeNode::<i32>::root();
+        assert!(root.find("é/x").is_none());
+        assert!(root.find("東京/タワー/x.txt").is_none());
     }
 
     #[test]
