@@ -1,2 +1,4 @@
 /target
 *.png
+/mutants.out
+/mutants.out.old
