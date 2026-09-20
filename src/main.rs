@@ -297,3 +297,54 @@ async fn serve(stream: TcpStream, file: File, tree: &FsTreeNode, buf_pool: BufPo
     }
     tracing::info!("finished serving connection");
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn an_absent_flag_list_leaves_every_flag_off() {
+        let flags = UringFlags::parse("").unwrap();
+        assert!(!flags.single_issuer && !flags.coop_taskrun && !flags.defer_taskrun);
+    }
+
+    #[test]
+    fn a_single_flag_is_recognised() {
+        let flags = UringFlags::parse("single_issuer").unwrap();
+        assert!(flags.single_issuer);
+        assert!(!flags.coop_taskrun && !flags.defer_taskrun);
+    }
+
+    /// Surrounding space and stray separators are tolerated, so that a list can be
+    /// assembled by a shell script without care.
+    #[test]
+    fn the_full_list_is_recognised_despite_untidy_separators() {
+        let flags = UringFlags::parse(" coop_taskrun ,, defer_taskrun , single_issuer,").unwrap();
+        assert!(flags.single_issuer && flags.coop_taskrun && flags.defer_taskrun);
+    }
+
+    #[test]
+    fn defer_taskrun_alone_is_rejected() {
+        let err = UringFlags::parse("defer_taskrun").unwrap_err().to_string();
+        assert!(err.contains("single_issuer"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_name_is_rejected() {
+        let err = UringFlags::parse("coop_taskrun,bogus")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("bogus"), "{err}");
+    }
+
+    /// The environment is read into the very flags that `parse` yields.
+    #[test]
+    fn from_env_reads_the_flag_list() {
+        // SAFETY: no other test reads or writes this variable.
+        unsafe { std::env::set_var("ZIPRING_URING_FLAGS", "coop_taskrun") };
+        let flags = UringFlags::from_env().unwrap();
+        unsafe { std::env::remove_var("ZIPRING_URING_FLAGS") };
+        assert!(flags.coop_taskrun);
+        assert!(!flags.single_issuer && !flags.defer_taskrun);
+    }
+}
