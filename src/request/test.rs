@@ -199,6 +199,23 @@ fn test_parse_get_with_connection_close() {
 }
 
 #[test]
+fn test_parse_get_with_connection_keep_alive() {
+    run(async {
+        let data = b"GET / HTTP/1.1\r\nConnection: keep-alive\r\n\r\n".to_vec();
+        let mut reader = TestReader::new(data);
+        let result = parse_one(&mut reader, make_buf(1024)).await.unwrap();
+        assert!(result.keep_alive());
+        assert_matches!(
+            result,
+            Request::Get {
+                headers: Headers { close: false, .. },
+                ..
+            }
+        );
+    });
+}
+
+#[test]
 fn test_parse_post_not_allowed() {
     run(async {
         let data = b"POST / HTTP/1.1\r\nContent-Length: 0\r\n\r\n".to_vec();
@@ -417,5 +434,25 @@ fn test_parse_too_many_headers() {
                 ..
             }
         );
+    });
+}
+
+#[test]
+fn test_debug_renders_both_kinds_of_request() {
+    run(async {
+        let data = b"GET /style.css HTTP/1.1\r\nConnection: close\r\n\r\n".to_vec();
+        let mut reader = TestReader::new(data);
+        let get = parse_one(&mut reader, make_buf(1024)).await.unwrap();
+        let rendered = format!("{get:?}");
+        assert!(rendered.starts_with("Get {"), "{rendered}");
+        assert!(rendered.contains("path: \"/style.css\""), "{rendered}");
+        assert!(rendered.contains("close: true"), "{rendered}");
+
+        let data = b"POST / HTTP/1.1\r\nContent-Length: 0\r\n\r\n".to_vec();
+        let mut reader = TestReader::new(data);
+        let bad = parse_one(&mut reader, make_buf(1024)).await.unwrap();
+        let rendered = format!("{bad:?}");
+        assert!(rendered.starts_with("Bad {"), "{rendered}");
+        assert!(rendered.contains("MethodNotAllowed"), "{rendered}");
     });
 }
