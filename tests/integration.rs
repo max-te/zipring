@@ -559,3 +559,69 @@ fn test_connection_close() {
     // Zero-sized read indicates EOF
     assert_eq!(stream.read_to_end(&mut buf).unwrap(), 0);
 }
+
+/// Archives whose entry names are not ASCII, in both spellings the format allows:
+/// one sets the UTF-8 flag, the other leaves it clear and stores shift-jis bytes,
+/// which `rc_zip` transcodes. Both hold `日本語のファイル.txt`, `ソフトウェア設定.txt`
+/// and, under a non-ascii directory, `写真/東京タワー.txt`.
+const NON_ASCII_UTF8_FILE: &str = "tests/resources/non_ascii_utf8.zip";
+const NON_ASCII_SHIFT_JIS_FILE: &str = "tests/resources/non_ascii_shift_jis.zip";
+
+#[test]
+fn test_serve_utf8_flagged_archive() {
+    let server = start_server(PathBuf::from(NON_ASCII_UTF8_FILE));
+
+    let (headers, body) = make_request(&server, "/", "gzip").expect("Request failed");
+    let listing = String::from_utf8(body).expect("listing should be UTF-8");
+    assert!(headers.contains("200 OK"), "{headers}");
+    assert!(listing.contains(">日本語のファイル.txt</a>"), "{listing}");
+    assert!(listing.contains(">写真</a>"), "{listing}");
+    assert!(
+        listing.contains("href=\"./%E5%86%99%E7%9C%9F/\""),
+        "a non-ascii name should be percent-encoded in its href: {listing}"
+    );
+
+    let nested = "/%E5%86%99%E7%9C%9F/%E6%9D%B1%E4%BA%AC%E3%82%BF%E3%83%AF%E3%83%BC.txt";
+    let (headers, body) = make_request(&server, nested, "gzip").expect("Request failed");
+    assert!(headers.contains("200 OK"), "{headers}");
+    assert_eq!(
+        String::from_utf8(body).expect("content should be UTF-8"),
+        "contents of 写真/東京タワー.txt\n"
+    );
+}
+
+/// Which encoding `rc_zip` guesses for an archive that declares none is its own
+/// business -- it currently recovers the Japanese names exactly. Ours is that the
+/// archive is served at all, and that every name it lists is reachable by the href
+/// given for it.
+#[test]
+fn test_serve_archive_without_an_encoding_flag() {
+    let server = start_server(PathBuf::from(NON_ASCII_SHIFT_JIS_FILE));
+
+    let (headers, body) = make_request(&server, "/", "gzip").expect("Request failed");
+    let listing = String::from_utf8(body).expect("listing should be UTF-8");
+    assert!(headers.contains("200 OK"), "{headers}");
+
+    let hrefs = hrefs_of(&listing);
+    assert_eq!(hrefs.len(), 3, "every entry should be listed: {listing}");
+
+    for href in hrefs {
+        let path = format!("/{}", href.trim_start_matches("./"));
+        let (headers, body) = make_request(&server, &path, "gzip")
+            .unwrap_or_else(|e| panic!("request for {path} failed: {e}"));
+        assert!(headers.contains("200 OK"), "{path}: {headers}");
+        if !path.ends_with('/') {
+            let content = String::from_utf8(body).expect("content should be UTF-8");
+            assert!(content.starts_with("contents of "), "{path}: {content}");
+        }
+    }
+}
+
+/// The href of every entry a listing offers, in the order they appear.
+fn hrefs_of(listing: &str) -> Vec<&str> {
+    listing
+        .split("href=\"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .collect()
+}
