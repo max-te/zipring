@@ -51,10 +51,7 @@ impl Debug for Request {
         match self {
             Request::Get { path, headers } => f
                 .debug_struct("Get")
-                .field(
-                    "path",
-                    &str::from_utf8(path).expect("path should be valid utf-8"),
-                )
+                .field("path", &String::from_utf8_lossy(path))
                 .field("if_none_match", &headers.if_none_match)
                 .field("accepted_encodings", &headers.accepted_encodings)
                 .field("close", &headers.close)

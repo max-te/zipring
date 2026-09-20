@@ -456,3 +456,16 @@ fn test_debug_renders_both_kinds_of_request() {
         assert!(rendered.contains("MethodNotAllowed"), "{rendered}");
     });
 }
+
+/// A percent-encoded path need not be UTF-8, and `respond` serves such a request a
+/// 404 rather than refusing it -- so rendering one must not panic either.
+#[test]
+fn test_debug_renders_a_path_that_is_not_utf8() {
+    run(async {
+        let data = b"GET /%FF HTTP/1.1\r\n\r\n".to_vec();
+        let mut reader = TestReader::new(data);
+        let get = parse_one(&mut reader, make_buf(1024)).await.unwrap();
+        let rendered = format!("{get:?}");
+        assert!(rendered.contains("path: \"/\u{FFFD}\""), "{rendered}");
+    });
+}
