@@ -527,3 +527,10 @@ fn decode_chunked(framed: &[u8]) -> Vec<u8> {
         rest = &rest[len + 2..];
     }
 }
+
+#[test]
+fn test_position_of_an_absent_byte() {
+    assert_eq!(position(b"HTTP/1.1 304", b'x'), None);
+    assert_eq!(position(b"", b'x'), None);
+    assert_eq!(position(b"ETag: \"xxxxxxxx\"", b'x'), Some(7));
+}

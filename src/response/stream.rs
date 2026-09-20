@@ -448,7 +448,7 @@ pub(super) struct ContentCompression {
     pub encoding: &'static str,
 }
 
-const fn position(haystack: &[u8], needle: u8) -> Option<usize> {
+pub(super) const fn position(haystack: &[u8], needle: u8) -> Option<usize> {
     let mut idx = 0;
     while idx < haystack.len() {
         if haystack[idx] == needle {
