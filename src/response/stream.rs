@@ -3,7 +3,7 @@ use std::io::{Cursor, Write};
 use std::ops::RangeBounds;
 
 use compio::BufResult;
-use compio::buf::{IntoInner, IoBuf};
+use compio::buf::{IntoInner, IoBuf, buf_try};
 use compio::fs::File;
 use compio::io::{AsyncReadAt, AsyncReadAtExt, AsyncWriteExt};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
@@ -173,6 +173,30 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         self.write_buf(..end).await
     }
 
+    /// Appends `args` to the chunk payload staged at `prefix + HTTP_CHUNK_SIZE_LEN`,
+    /// flushing that chunk first when it cannot hold `args` whole.
+    async fn append_fmt_chunked(
+        mut self,
+        prefix: &mut usize,
+        staged: &mut usize,
+        args: fmt::Arguments<'_>,
+    ) -> BufResult<(), Self> {
+        let limit = chunk_limit(self.buf.len());
+        loop {
+            let payload = &mut self.buf[*prefix + HTTP_CHUNK_SIZE_LEN..limit];
+            match append_fmt(payload, staged, args) {
+                Ok(()) => return BufResult(Ok(()), self),
+                // Not even an empty chunk can hold `args`.
+                Err(e) if *staged == 0 => bail_traced!(e, self),
+                Err(_) => {
+                    ((), self) = buf_try_traced!(self.flush_chunk(*prefix, *staged, false).await);
+                }
+            }
+            *prefix = 0;
+            *staged = 0;
+        }
+    }
+
     #[tracing::instrument(skip_all)]
     async fn send_compressed_entry(
         mut self,
@@ -275,7 +299,6 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
     ) -> BufResult<(), Self> {
         const INDEX_PREAMBLE: &str = include_str!("index.html");
         const INDEX_HEADER: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nTransfer-Encoding: chunked\r\n\r\n";
-        let limit = chunk_limit(self.buf.len());
         debug_assert!(
             self.buf.len() > INDEX_PREAMBLE.len() * 2,
             "buffer should have ample space"
@@ -291,12 +314,14 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         } else {
             "<li class=top><a href=\"..\">..</a>\n"
         };
-        let res = append_fmt(
-            &mut self.buf[prefix + HTTP_CHUNK_SIZE_LEN..limit],
-            &mut staged,
-            format_args!("{INDEX_PREAMBLE}{top}"),
+        ((), self) = buf_try!(
+            self.append_fmt_chunked(
+                &mut prefix,
+                &mut staged,
+                format_args!("{INDEX_PREAMBLE}{top}")
+            )
+            .await
         );
-        ((), self) = buf_try_traced!(res, self);
 
         let dirs = entries.iter().filter_map(|entry| match entry {
             FsTreeNode::Dir { name, .. } => Some((name, " class=dir", "/")),
@@ -307,27 +332,18 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
             FsTreeNode::Dir { .. } => None,
         });
         for (name, class, slash) in dirs.chain(files) {
-            loop {
-                let res = append_fmt(
-                    &mut self.buf[prefix + HTTP_CHUNK_SIZE_LEN..limit],
+            ((), self) = buf_try!(
+                self.append_fmt_chunked(
+                    &mut prefix,
                     &mut staged,
                     format_args!(
                         "<li{class}><a href=\"./{name_url}{slash}\">{name_html}</a>\n",
                         name_url = utf8_percent_encode(name, URI_FRAGMENT_ENCODING_SET),
                         name_html = v_htmlescape::escape(name),
                     ),
-                );
-                match res {
-                    Ok(()) => break,
-                    // Not even an empty chunk can hold this entry.
-                    Err(e) if staged == 0 => bail_traced!(e, self),
-                    Err(_) => {
-                        ((), self) = buf_try_traced!(self.flush_chunk(prefix, staged, false).await);
-                    }
-                }
-                prefix = 0;
-                staged = 0;
-            }
+                )
+                .await
+            );
         }
 
         ((), self) = buf_try_traced!(self.flush_chunk(prefix, staged, true).await);
