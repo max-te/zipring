@@ -10,6 +10,7 @@ use tracing::field;
 use crate::Buf;
 use stream::ResponseStream;
 
+mod body;
 mod coding;
 pub mod status;
 mod stream;

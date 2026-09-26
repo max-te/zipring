@@ -1,8 +1,10 @@
 use compio::BufResult;
 use compio::buf::{IoBuf, IoVectoredBuf};
+use compio::fs::File;
 use compio::io::AsyncWrite;
 use rc_zip::parse::{Entry, Method as ZipMethod, Mode, Version};
 
+use super::body::EntryBody;
 use super::coding::NativeCoding;
 use super::stream::*;
 use crate::Buf;
@@ -433,23 +435,148 @@ fn test_serve_target_redirects_into_the_dir() {
     );
 }
 
-/// A compressed entry whose stream runs past the end of the archive is refused
-/// rather than served short.
-#[test]
-fn test_serve_entry_reaching_past_the_archive_fails() {
-    let mut writer = TestWriter::new();
-    let err = run(async {
-        let file = compio::fs::File::open(FIXTURE).await.unwrap();
+/// Drains `body` through a buffer of `buflen` bytes, returning the size of each
+/// portion and the bytes of all of them.
+async fn drain(
+    body: &mut EntryBody<'_>,
+    file: &File,
+    buflen: usize,
+) -> std::io::Result<(Vec<usize>, Vec<u8>)> {
+    let mut buf = make_buf(buflen);
+    let (mut portions, mut bytes) = (Vec::new(), Vec::new());
+    loop {
+        let BufResult(res, returned) = body.fill(file, buf, 0).await;
+        buf = returned;
+        match res? {
+            0 => return Ok((portions, bytes)),
+            n => {
+                portions.push(n);
+                bytes.extend_from_slice(&buf[..n]);
+            }
+        }
+    }
+}
+
+/// Opens the fixture and hands `test` the named entry along with the file.
+fn with_fixture_entry<T>(name: &str, test: impl AsyncFnOnce(&File, Entry) -> T) -> T {
+    run(async {
+        let file = File::open(FIXTURE).await.unwrap();
         let archive = crate::rc_zip_compio::read_zip_from_file(&file)
             .await
             .unwrap();
-        let mut entry = fixture_entry(&archive, "index.html");
+        test(&file, fixture_entry(&archive, name)).await
+    })
+}
+
+#[test]
+fn test_entry_body_gzip_in_small_portions() {
+    let (entry, portions, bytes) = with_fixture_entry("index.html", async |file, entry| {
+        let mut body = EntryBody::new(&entry, Some(NativeCoding::Gzip));
+        let (portions, bytes) = drain(&mut body, file, SMALL_BUF).await.unwrap();
+        (entry, portions, bytes)
+    });
+    assert!(portions.len() > 1, "{portions:?}");
+    assert!(portions.iter().all(|&n| n <= SMALL_BUF), "{portions:?}");
+    assert_eq!(
+        bytes.len() as u64,
+        NativeCoding::Gzip.content_length(&entry)
+    );
+    assert_entry_contents(&mut flate2::read::GzDecoder::new(&bytes[..]), &entry);
+}
+
+#[test]
+fn test_entry_body_decoded_in_small_portions() {
+    let (entry, portions, bytes) = with_fixture_entry("index.html", async |file, entry| {
+        let mut body = EntryBody::new(&entry, None);
+        let (portions, bytes) = drain(&mut body, file, SMALL_BUF).await.unwrap();
+        (entry, portions, bytes)
+    });
+    assert!(portions.len() > 1, "{portions:?}");
+    assert_entry_contents(&mut &bytes[..], &entry);
+}
+
+/// With room to spare, the whole gzip member leaves as one portion.
+#[test]
+fn test_entry_body_trailer_rides_with_the_last_data() {
+    let (entry, portions) = with_fixture_entry("index.html", async |file, entry| {
+        let whole = usize::try_from(NativeCoding::Gzip.content_length(&entry)).unwrap();
+        let mut body = EntryBody::new(&entry, Some(NativeCoding::Gzip));
+        let (portions, _) = drain(&mut body, file, whole).await.unwrap();
+        (entry, portions)
+    });
+    assert_eq!(
+        portions,
+        [usize::try_from(NativeCoding::Gzip.content_length(&entry)).unwrap()]
+    );
+}
+
+/// Data that ends too close to the end of the buffer leaves the trailer for a
+/// portion of its own, rather than being cut short to make room for it.
+#[test]
+fn test_entry_body_trailer_spills_when_the_data_fills_the_buffer() {
+    let (entry, portions, bytes) = with_fixture_entry("index.html", async |file, entry| {
+        let whole = usize::try_from(NativeCoding::Gzip.content_length(&entry)).unwrap();
+        let mut body = EntryBody::new(&entry, Some(NativeCoding::Gzip));
+        let (portions, bytes) = drain(&mut body, file, whole - 4).await.unwrap();
+        (entry, portions, bytes)
+    });
+    let trailer_len = NativeCoding::Gzip.trailer_len();
+    let whole = usize::try_from(NativeCoding::Gzip.content_length(&entry)).unwrap();
+    assert_eq!(portions, [whole - trailer_len, trailer_len]);
+    assert_entry_contents(&mut flate2::read::GzDecoder::new(&bytes[..]), &entry);
+}
+
+/// What the caller staged in front of `at` is left alone.
+#[test]
+fn test_entry_body_fills_behind_what_is_staged() {
+    const STAGED: usize = 100;
+    let buf = with_fixture_entry("index.html", async |file, entry| {
+        let mut buf = make_buf(SMALL_BUF);
+        buf[..STAGED].fill(b'H');
+        let mut body = EntryBody::new(&entry, Some(NativeCoding::Gzip));
+        let BufResult(res, buf) = body.fill(file, buf, STAGED).await;
+        assert_eq!(res.unwrap(), SMALL_BUF - STAGED);
+        buf
+    });
+    assert!(buf[..STAGED].iter().all(|&b| b == b'H'));
+    assert_eq!(buf[STAGED..STAGED + 2], [0x1f, 0x8b], "gzip magic");
+}
+
+#[test]
+fn test_entry_body_of_an_empty_entry_is_empty_when_decoded() {
+    let portions = with_fixture_entry("images/", async |file, entry| {
+        let mut body = EntryBody::new(&entry, None);
+        drain(&mut body, file, SMALL_BUF).await.unwrap().0
+    });
+    assert!(portions.is_empty(), "{portions:?}");
+}
+
+/// Natively, even an empty entry has its framing: an empty deflate stream,
+/// wrapped as a gzip member.
+#[test]
+fn test_entry_body_of_an_empty_entry_is_its_framing_when_native() {
+    let (entry, bytes) = with_fixture_entry("images/", async |file, entry| {
+        let mut body = EntryBody::new(&entry, Some(NativeCoding::Gzip));
+        let (_, bytes) = drain(&mut body, file, SMALL_BUF).await.unwrap();
+        (entry, bytes)
+    });
+    assert_eq!(
+        bytes.len() as u64,
+        NativeCoding::Gzip.content_length(&entry)
+    );
+    assert_entry_contents(&mut flate2::read::GzDecoder::new(&bytes[..]), &entry);
+}
+
+/// A compressed entry whose stream runs past the end of the archive is refused
+/// rather than served short.
+#[test]
+fn test_entry_body_reaching_past_the_archive_fails() {
+    let err = with_fixture_entry("index.html", async |file, mut entry| {
         entry.compressed_size = 1 << 20;
-        ResponseStream::new(&mut writer, make_buf(SMALL_BUF))
-            .serve_target(&file, Target::Entry(&entry), accepting(GZIP_ACCEPTED))
+        let mut body = EntryBody::new(&entry, Some(NativeCoding::Gzip));
+        drain(&mut body, file, SMALL_BUF)
             .await
-            .0
-            .expect_err("should refuse to serve past the archive's end")
+            .expect_err("should refuse to read past the archive's end")
     });
     assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
 }

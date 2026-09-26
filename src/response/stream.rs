@@ -5,20 +5,17 @@ use std::ops::RangeBounds;
 use compio::BufResult;
 use compio::buf::{IntoInner, IoBuf, buf_try};
 use compio::fs::File;
-use compio::io::{AsyncReadAt, AsyncReadAtExt, AsyncWriteExt};
+use compio::io::AsyncWriteExt;
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
-use rc_zip::{
-    Entry,
-    fsm::{EntryFsm, FsmResult},
-};
+use rc_zip::Entry;
 
 use crate::{
     Buf,
     buf_result::{bail_traced, buf_try_traced},
     fstree::{FsTreeNode, Target},
-    rc_zip_compio::{find_entry_compressed_data, is_method_supported},
+    rc_zip_compio::is_method_supported,
     request::{AcceptedEncodings, Headers},
-    response::{coding::NativeCoding, status::HttpStatus},
+    response::{body::EntryBody, coding::NativeCoding, status::HttpStatus},
 };
 
 const HTTP_CHUNK_DIGIT_COUNT: usize = size_of::<usize>() * 2;
@@ -130,28 +127,6 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         BufResult(res, self)
     }
 
-    async fn read_buf_at(
-        mut self,
-        file: &File,
-        range: impl RangeBounds<usize>,
-        offset: u64,
-    ) -> BufResult<usize, Self> {
-        let BufResult(res, slice) = file.read_at(self.buf.slice(range), offset).await;
-        self.buf = slice.into_inner();
-        BufResult(res, self)
-    }
-
-    async fn read_exact_buf_at(
-        mut self,
-        file: &File,
-        range: impl RangeBounds<usize>,
-        offset: u64,
-    ) -> BufResult<(), Self> {
-        let BufResult(res, slice) = file.read_exact_at(self.buf.slice(range), offset).await;
-        self.buf = slice.into_inner();
-        BufResult(res, self)
-    }
-
     /// Frames `chunk` and writes the buffer from its very start, so that whatever occupies
     /// `buf[..chunk.prefix]` -- the response header, on the first chunk -- leaves in the
     /// same write.
@@ -201,98 +176,6 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
             }
             chunk = PendingChunk { prefix: 0, len: 0 };
         }
-    }
-
-    /// Sends `entry` in its native coding, which it must have.
-    #[tracing::instrument(skip_all)]
-    async fn send_native_entry(
-        mut self,
-        file: &File,
-        entry: &Entry,
-        head_len: usize,
-    ) -> BufResult<(), Self> {
-        let native = NativeCoding::of(entry.method).expect("entry should have a native coding");
-        let prefix = native.prefix();
-        let trailer_len = native.trailer_len();
-
-        let mut prefix_len = head_len;
-        self.buf[prefix_len..prefix_len + prefix.len()].copy_from_slice(prefix);
-        prefix_len += prefix.len();
-
-        let mut len =
-            usize::try_from(entry.compressed_size).expect("entry size should fit into usize");
-        let BufResult(res, scratch) =
-            find_entry_compressed_data(file, entry, self.buf.slice(prefix_len..)).await;
-        self.buf = scratch.into_inner();
-        let mut offset;
-        (offset, self) = buf_try_traced!(res, self);
-        tracing::debug!("found compressed data");
-
-        let mut is_last = false;
-        while !is_last {
-            // Leaving room for the trailer lets a body that just fits still ship in one write.
-            let room = self.buf.len() - prefix_len - trailer_len;
-            let n = len.min(room);
-            ((), self) = buf_try_traced!(
-                self.read_exact_buf_at(file, prefix_len..prefix_len + n, offset)
-                    .await
-            );
-            offset += n as u64;
-            len -= n;
-
-            is_last = len == 0;
-            let mut end = prefix_len + n;
-            if is_last {
-                native.write_trailer(entry, &mut self.buf[end..end + trailer_len]);
-                end += trailer_len;
-            }
-            ((), self) = buf_try_traced!(self.write_buf(..end).await);
-            prefix_len = 0;
-        }
-
-        BufResult(Ok(()), self)
-    }
-
-    #[tracing::instrument(skip_all)]
-    async fn send_decompressed_entry(
-        mut self,
-        file: &File,
-        entry: &Entry,
-        head_len: usize,
-    ) -> BufResult<(), Self> {
-        let mut offset = entry.header_offset;
-        let mut prefix_len = head_len;
-        let mut fsm = EntryFsm::new(None, None);
-        loop {
-            if fsm.wants_read() {
-                let available_space = fsm.space().len().min(self.buf.len() - prefix_len);
-                let bytes_read;
-                (bytes_read, self) = buf_try_traced!(
-                    self.read_buf_at(file, prefix_len..prefix_len + available_space, offset)
-                        .await
-                );
-                fsm.space()[..bytes_read]
-                    .copy_from_slice(&self.buf[prefix_len..prefix_len + bytes_read]);
-                fsm.fill(bytes_read);
-                offset += bytes_read as u64;
-            }
-            let outcome;
-            (fsm, outcome) = match fsm.process(&mut self.buf[prefix_len..]) {
-                Ok(FsmResult::Continue(continued)) => continued,
-                Ok(FsmResult::Done(_buffer)) => break,
-                Err(err) => bail_traced!(std::io::Error::other(err), self),
-            };
-            if outcome.bytes_written > 0 {
-                ((), self) =
-                    buf_try_traced!(self.write_buf(..prefix_len + outcome.bytes_written).await);
-                prefix_len = 0;
-            }
-        }
-        if prefix_len > 0 {
-            // An entry without any content still owes its header.
-            ((), self) = buf_try_traced!(self.write_buf(..prefix_len).await);
-        }
-        BufResult(Ok(()), self)
     }
 
     #[tracing::instrument(skip_all, level = "info")]
@@ -369,11 +252,34 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         let res = write_entry_header(&mut self.buf, entry, native);
         let head_len;
         (head_len, self) = buf_try_traced!(res, self);
-        if native.is_some() {
-            self.send_native_entry(file, entry, head_len).await
-        } else {
-            self.send_decompressed_entry(file, entry, head_len).await
+        self.send_body(file, EntryBody::new(entry, native), head_len)
+            .await
+    }
+
+    /// Sends `body` behind the `staged` bytes already at the front of the buffer,
+    /// which leave with its first portion -- or alone, if it has none.
+    #[tracing::instrument(skip_all)]
+    async fn send_body(
+        mut self,
+        file: &File,
+        mut body: EntryBody<'_>,
+        mut staged: usize,
+    ) -> BufResult<(), Self> {
+        loop {
+            let BufResult(res, buf) = body.fill(file, self.buf, staged).await;
+            self.buf = buf;
+            let n;
+            (n, self) = buf_try_traced!(res, self);
+            if n == 0 && staged == 0 {
+                break;
+            }
+            ((), self) = buf_try_traced!(self.write_buf(..staged + n).await);
+            if n == 0 {
+                break;
+            }
+            staged = 0;
         }
+        BufResult(Ok(()), self)
     }
 
     pub async fn serve_target(
