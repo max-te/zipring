@@ -240,7 +240,6 @@ fn node_dir(name: &str) -> FsTreeNode {
     FsTreeNode::Dir {
         name: name.to_string(),
         children: vec![],
-        entry: None,
         is_root: false,
         index_html_index: None,
     }

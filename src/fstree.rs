@@ -5,7 +5,6 @@ pub(crate) enum FsTreeNode<E: Clone = Entry> {
     Dir {
         name: String,
         children: Vec<FsTreeNode<E>>,
-        entry: Option<E>,
         is_root: bool,
         index_html_index: Option<usize>,
     },
@@ -67,7 +66,6 @@ impl<E: Clone> FsTreeNode<E> {
                 children.push(FsTreeNode::Dir {
                     name: head.clone(),
                     children: vec![],
-                    entry: None,
                     is_root: false,
                     index_html_index: None,
                 });
@@ -76,20 +74,11 @@ impl<E: Clone> FsTreeNode<E> {
                     .expect("should find the just inserted child")
             };
 
+            // A trailing slash names the directory itself, which keeps no entry.
             if tail.len() > 1 {
                 // Recurse
                 let tail = tail.split_off(1);
                 child.insert_at(new_entry, tail);
-            } else {
-                // We are at the insertion site of a directory.
-                match child {
-                    FsTreeNode::Dir {
-                        entry: dir_entry, ..
-                    } => {
-                        let _ = dir_entry.insert(new_entry);
-                    }
-                    FsTreeNode::File { .. } => unreachable!(),
-                }
             }
         } else {
             // Insertion site of a file
@@ -107,7 +96,6 @@ impl<E: Clone> FsTreeNode<E> {
         FsTreeNode::Dir {
             name: String::new(),
             children: Vec::new(),
-            entry: None,
             is_root: true,
             index_html_index: None,
         }
@@ -116,14 +104,6 @@ impl<E: Clone> FsTreeNode<E> {
     pub(crate) fn name(&self) -> &str {
         match self {
             FsTreeNode::Dir { name, .. } | FsTreeNode::File { name, .. } => name,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn entry(&self) -> Option<&E> {
-        match self {
-            FsTreeNode::Dir { entry, .. } => entry.as_ref(),
-            FsTreeNode::File { entry, .. } => Some(entry),
         }
     }
 
@@ -191,7 +171,6 @@ mod tests {
         FsTreeNode::Dir {
             name: name.to_string(),
             children: vec![],
-            entry: None,
             is_root: false,
             index_html_index: None,
         }
@@ -204,6 +183,13 @@ mod tests {
         }
     }
 
+    fn resolved_entry(root: &FsTreeNode<i32>, path: &str) -> i32 {
+        match root.resolve(path) {
+            Some(Target::Entry(entry)) => *entry,
+            other => panic!("{path} should resolve to an entry, not {other:?}"),
+        }
+    }
+
     /// Entry names are only ASCII by convention; a zip may hold any UTF-8, and
     /// `rc_zip` transcodes cp437 and shift-jis names into it.
     #[test]
@@ -212,14 +198,8 @@ mod tests {
         root.insert_at(1, "写真/東京タワー.txt".to_string());
         root.insert_at(2, "日本語のファイル.txt".to_string());
 
-        assert_eq!(
-            *root.find("写真/東京タワー.txt").unwrap().entry().unwrap(),
-            1
-        );
-        assert_eq!(
-            *root.find("日本語のファイル.txt").unwrap().entry().unwrap(),
-            2
-        );
+        assert_eq!(resolved_entry(&root, "写真/東京タワー.txt"), 1);
+        assert_eq!(resolved_entry(&root, "日本語のファイル.txt"), 2);
         assert_eq!(root.find("写真").unwrap().name(), "写真");
     }
 
@@ -236,7 +216,6 @@ mod tests {
     fn test_root_creates_empty_dir() {
         let root = FsTreeNode::<i32>::root();
         assert_eq!(root.name(), "");
-        assert!(root.entry().is_none());
         let FsTreeNode::Dir { is_root, .. } = root else {
             panic!("root should be a Dir");
         };
@@ -250,19 +229,13 @@ mod tests {
     }
 
     #[test]
-    fn test_entry_returns_entry() {
-        assert_eq!(*file("f.txt", 99).entry().unwrap(), 99);
-        assert!(dir("d").entry().is_none());
-        assert!(FsTreeNode::<i32>::root().entry().is_none());
-    }
-
-    #[test]
-    fn test_dir_entry_via_trailing_slash() {
+    fn test_dir_via_trailing_slash() {
         let mut root = FsTreeNode::<i32>::root();
         root.insert_at(42, "subdir/".to_string());
-        let subdir = root.find("subdir").unwrap();
-        assert!(matches!(subdir, FsTreeNode::Dir { .. }));
-        assert_eq!(*subdir.entry().unwrap(), 42);
+        assert!(matches!(
+            root.find("subdir").unwrap(),
+            FsTreeNode::Dir { .. }
+        ));
     }
 
     #[test]
@@ -271,7 +244,7 @@ mod tests {
         root.insert_at(42, "hello.txt".to_string());
         let found = root.find("hello.txt").unwrap();
         assert_eq!(found.name(), "hello.txt");
-        assert_eq!(*found.entry().unwrap(), 42);
+        assert_eq!(resolved_entry(&root, "hello.txt"), 42);
         assert!(matches!(found, FsTreeNode::File { .. }));
     }
 
@@ -281,9 +254,9 @@ mod tests {
         root.insert_at(1, "a.txt".to_string());
         root.insert_at(2, "b.txt".to_string());
         root.insert_at(3, "c.txt".to_string());
-        assert_eq!(*root.find("a.txt").unwrap().entry().unwrap(), 1);
-        assert_eq!(*root.find("b.txt").unwrap().entry().unwrap(), 2);
-        assert_eq!(*root.find("c.txt").unwrap().entry().unwrap(), 3);
+        assert_eq!(resolved_entry(&root, "a.txt"), 1);
+        assert_eq!(resolved_entry(&root, "b.txt"), 2);
+        assert_eq!(resolved_entry(&root, "c.txt"), 3);
         match root {
             FsTreeNode::Dir { children, .. } => assert_eq!(children.len(), 3),
             FsTreeNode::File { .. } => panic!("root should be Dir"),
@@ -297,7 +270,7 @@ mod tests {
         assert!(matches!(root.find("a").unwrap(), FsTreeNode::Dir { .. }));
         assert!(matches!(root.find("a/b").unwrap(), FsTreeNode::Dir { .. }));
         assert!(root.find("a/b/c.txt").is_some());
-        assert_eq!(*root.find("a/b/c.txt").unwrap().entry().unwrap(), 99);
+        assert_eq!(resolved_entry(&root, "a/b/c.txt"), 99);
     }
 
     #[test]
@@ -305,8 +278,8 @@ mod tests {
         let mut root = FsTreeNode::<i32>::root();
         root.insert_at(1, "dir/x.txt".to_string());
         root.insert_at(2, "dir/y.txt".to_string());
-        assert_eq!(*root.find("dir/x.txt").unwrap().entry().unwrap(), 1);
-        assert_eq!(*root.find("dir/y.txt").unwrap().entry().unwrap(), 2);
+        assert_eq!(resolved_entry(&root, "dir/x.txt"), 1);
+        assert_eq!(resolved_entry(&root, "dir/y.txt"), 2);
     }
 
     #[test]
@@ -330,7 +303,7 @@ mod tests {
     fn test_find_with_leading_slash() {
         let mut root = FsTreeNode::<i32>::root();
         root.insert_at(42, "file.txt".to_string());
-        assert_eq!(*root.find("/file.txt").unwrap().entry().unwrap(), 42);
+        assert_eq!(resolved_entry(&root, "/file.txt"), 42);
     }
 
     #[test]
