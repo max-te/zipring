@@ -12,7 +12,7 @@
 use compio::BufResult;
 use compio::buf::{IntoInner, IoBuf, IoBufMut, buf_try};
 use compio::fs::File;
-use compio::io::AsyncReadAt;
+use compio::io::{AsyncReadAt, AsyncReadAtExt};
 use rc_zip::parse::Method;
 use rc_zip::{
     error::Error,
@@ -74,26 +74,13 @@ pub async fn find_entry_compressed_data<B: IoBuf + IoBufMut>(
     entry: &Entry,
     buf: B,
 ) -> BufResult<u64, B> {
-    let mut buf = buf;
     let offset = entry.header_offset;
     // https://en.wikipedia.org/wiki/ZIP_(file_format)#Local_file_header
-    let mut cursor = 0;
-    while cursor < 30 {
-        let n;
-        (n, buf) = buf_try!(
-            file.read_at(buf.slice(cursor..30), offset + (cursor as u64))
-                .await
-                .into_inner()
-        );
-        if n == 0 {
-            let eof = std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "file ends within local header",
-            );
-            return BufResult(Err(eof), buf);
-        }
-        cursor += n;
-    }
+    let ((), buf) = buf_try!(
+        file.read_exact_at(buf.slice(..30), offset)
+            .await
+            .into_inner()
+    );
     let header = buf.as_init();
 
     // name_len and extra_len fields are at position 26 and 28 of the header
@@ -109,8 +96,6 @@ pub async fn find_entry_compressed_data<B: IoBuf + IoBufMut>(
 
 #[cfg(test)]
 mod test {
-    use compio::io::AsyncReadAtExt;
-
     use super::*;
 
     /// The archive served by the integration tests; every entry is deflated.
