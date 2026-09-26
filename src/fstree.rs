@@ -15,6 +15,17 @@ pub(crate) enum FsTreeNode<E: Clone = Entry> {
     },
 }
 
+/// What a request path is answered with.
+#[derive(Debug)]
+pub(crate) enum Target<'a, E: Clone = Entry> {
+    /// A file, or the `index.html` standing in for its directory.
+    Entry(&'a E),
+    Listing {
+        is_root: bool,
+        children: &'a [FsTreeNode<E>],
+    },
+}
+
 impl<E: Clone> std::fmt::Debug for FsTreeNode<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -108,6 +119,7 @@ impl<E: Clone> FsTreeNode<E> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn entry(&self) -> Option<&E> {
         match self {
             FsTreeNode::Dir { entry, .. } => entry.as_ref(),
@@ -135,6 +147,24 @@ impl<E: Clone> FsTreeNode<E> {
                 .and_then(|c| c.find(tail)),
             FsTreeNode::File { .. } => None,
         }
+    }
+
+    pub(crate) fn resolve(&self, path: &str) -> Option<Target<'_, E>> {
+        let target = match self.find(path)? {
+            FsTreeNode::File { entry, .. } => Target::Entry(entry),
+            FsTreeNode::Dir {
+                children,
+                index_html_index: Some(idx),
+                ..
+            } if let FsTreeNode::File { entry, .. } = &children[*idx] => Target::Entry(entry),
+            FsTreeNode::Dir {
+                is_root, children, ..
+            } => Target::Listing {
+                is_root: *is_root,
+                children,
+            },
+        };
+        Some(target)
     }
 
     pub(crate) fn recursive_sort(&mut self) {
@@ -393,5 +423,54 @@ mod tests {
             panic!("root should be a Dir");
         };
         assert_eq!(index_html_index, None);
+    }
+
+    #[test]
+    fn test_resolve_file_to_its_entry() {
+        let mut root = FsTreeNode::<i32>::root();
+        root.insert_at(7, "a/b.txt".to_string());
+        assert!(matches!(root.resolve("a/b.txt"), Some(Target::Entry(7))));
+    }
+
+    #[test]
+    fn test_resolve_dir_with_index_html_to_that_entry() {
+        let mut root = FsTreeNode::<i32>::root();
+        root.insert_at(1, "a/z.txt".to_string());
+        root.insert_at(2, "a/index.html".to_string());
+        root.recursive_sort();
+        assert!(matches!(root.resolve("a"), Some(Target::Entry(2))));
+        assert!(matches!(root.resolve("a/"), Some(Target::Entry(2))));
+    }
+
+    #[test]
+    fn test_resolve_dir_without_index_html_to_a_listing() {
+        let mut root = FsTreeNode::<i32>::root();
+        root.insert_at(1, "a/b.txt".to_string());
+        let Some(Target::Listing { is_root, children }) = root.resolve("a") else {
+            panic!("a should be listed");
+        };
+        assert!(!is_root);
+        assert_eq!(children.len(), 1);
+        assert!(matches!(
+            root.resolve("/"),
+            Some(Target::Listing { is_root: true, .. })
+        ));
+    }
+
+    /// A directory sharing the name can shadow `index.html` after sorting; it
+    /// must not stand in for its parent.
+    #[test]
+    fn test_resolve_dir_with_index_html_dir_to_a_listing() {
+        let mut root = FsTreeNode::<i32>::root();
+        root.insert_at(1, "index.html/x.txt".to_string());
+        root.insert_at(2, "index.html".to_string());
+        root.recursive_sort();
+        assert!(matches!(root.resolve(""), Some(Target::Listing { .. })));
+    }
+
+    #[test]
+    fn test_resolve_missing_path_to_none() {
+        let root = FsTreeNode::<i32>::root();
+        assert!(root.resolve("nope").is_none());
     }
 }

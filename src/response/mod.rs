@@ -25,7 +25,7 @@ pub async fn respond<W: AsyncWriteExt>(
     let respond_span = tracing::info_span!("response", path = field::Empty).entered();
     match request {
         Request::Get { path_len, headers } => {
-            let node = str::from_utf8(&buf[..path_len])
+            let target = str::from_utf8(&buf[..path_len])
                 .inspect(|path| {
                     respond_span.record("path", path);
                 })
@@ -33,27 +33,17 @@ pub async fn respond<W: AsyncWriteExt>(
                     tracing::warn!("path not utf-8: {e}");
                 })
                 .ok()
-                .and_then(|path| tree.find(path));
+                .and_then(|path| tree.resolve(path));
 
             let s = ResponseStream::new(stream, buf);
-            match node {
+            match target {
                 None => {
                     s.serve_status(HttpStatus::NotFound)
                         .instrument(respond_span.exit())
                         .await
                 }
-                Some(node)
-                    if let Some(crc32) = headers.if_none_match
-                        && let Some(entry) = node.entry()
-                        && entry.crc32 == crc32 =>
-                {
-                    tracing::debug!("etag matches");
-                    s.serve_not_modified(entry.crc32)
-                        .instrument(respond_span.exit())
-                        .await
-                }
-                Some(node) => {
-                    s.serve_node(file, node, headers.accepted_encodings)
+                Some(target) => {
+                    s.serve_target(file, target, headers)
                         .instrument(respond_span.exit())
                         .await
                 }

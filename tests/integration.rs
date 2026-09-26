@@ -373,43 +373,46 @@ fn test_request_path_that_is_not_ascii() {
     }
 }
 
+/// A directory holding `index.html` is revalidated against that file's `ETag`.
 #[test]
 fn test_request_etag_caching() {
     let zip_path = PathBuf::from(TEST_FILE);
     let server = start_server(zip_path);
 
-    // First request to get the ETag
-    let (headers, _body) = make_request(&server, "/metadata.opf", "gzip").expect("Request failed");
-    assert!(headers.contains("200 OK"));
+    for path in ["/metadata.opf", "/"] {
+        // First request to get the ETag
+        let (headers, _body) = make_request(&server, path, "gzip").expect("Request failed");
+        assert!(headers.contains("200 OK"), "{path}: {headers}");
 
-    let etag = headers
-        .lines()
-        .find(|line| line.contains("ETag:"))
-        .map(|line| {
-            line.trim_start_matches("ETag: ")
-                .trim_matches('"')
-                .to_string()
-        });
+        let etag = headers
+            .lines()
+            .find(|line| line.contains("ETag:"))
+            .map(|line| {
+                line.trim_start_matches("ETag: ")
+                    .trim_matches('"')
+                    .to_string()
+            });
 
-    assert!(etag.is_some(), "Response should have ETag header");
+        assert!(etag.is_some(), "{path}: Response should have ETag header");
 
-    // Make a second request with If-None-Match
-    let mut stream = TcpStream::connect(server.socket_address()).expect("Connection failed");
-    stream.set_nodelay(true).unwrap();
-    let request = format!(
-        "GET /metadata.opf HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: \"{}\"\r\nConnection: close\r\n\r\n",
-        etag.unwrap()
-    );
-    stream.write_all(request.as_bytes()).unwrap();
+        // Make a second request with If-None-Match
+        let mut stream = TcpStream::connect(server.socket_address()).expect("Connection failed");
+        stream.set_nodelay(true).unwrap();
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: \"{}\"\r\nConnection: close\r\n\r\n",
+            etag.unwrap()
+        );
+        stream.write_all(request.as_bytes()).unwrap();
 
-    let mut reader = BufReader::new(&stream);
-    let mut status_line = String::new();
-    reader.read_line(&mut status_line).unwrap();
+        let mut reader = BufReader::new(&stream);
+        let mut status_line = String::new();
+        reader.read_line(&mut status_line).unwrap();
 
-    assert!(
-        status_line.contains("304 Not Modified"),
-        "ETag match should return 304 Not Modified"
-    );
+        assert!(
+            status_line.contains("304 Not Modified"),
+            "{path}: ETag match should return 304 Not Modified"
+        );
+    }
 }
 
 #[test]

@@ -5,8 +5,8 @@ use rc_zip::parse::{Entry, Method as ZipMethod, Mode, Version};
 
 use super::stream::*;
 use crate::Buf;
-use crate::fstree::FsTreeNode;
-use crate::request::AcceptedEncodings;
+use crate::fstree::{FsTreeNode, Target};
+use crate::request::{AcceptedEncodings, Headers};
 use crate::response::status::HttpStatus;
 
 fn run<T>(future: impl Future<Output = T>) -> T {
@@ -279,7 +279,13 @@ const SMALL_BUF: usize = 2048;
 #[test]
 fn test_serve_deflated_entry_as_gzip_over_many_writes() {
     let mut writer = TestWriter::new();
-    let entry = run_with_fixture(&mut writer, SMALL_BUF, "index.html", GZIP_ACCEPTED, |r| r);
+    let entry = run_with_fixture(
+        &mut writer,
+        SMALL_BUF,
+        "index.html",
+        accepting(GZIP_ACCEPTED),
+        |r| r,
+    );
     let (head, body) = split_response(&writer.written);
 
     assert!(head.contains("Content-Encoding: gzip"), "{head}");
@@ -306,7 +312,7 @@ fn test_serve_deflated_entry_inflated_over_many_writes() {
         &mut writer,
         SMALL_BUF,
         "index.html",
-        NOTHING_ACCEPTED,
+        accepting(NOTHING_ACCEPTED),
         |r| r,
     );
     let (head, body) = split_response(&writer.written);
@@ -328,11 +334,53 @@ fn test_serve_deflated_entry_inflated_over_many_writes() {
 #[test]
 fn test_serve_empty_entry_sends_its_header() {
     let mut writer = TestWriter::new();
-    run_with_fixture(&mut writer, 4096, "images/", NOTHING_ACCEPTED, |r| r);
+    run_with_fixture(
+        &mut writer,
+        4096,
+        "images/",
+        accepting(NOTHING_ACCEPTED),
+        |r| r,
+    );
     let (head, body) = split_response(&writer.written);
 
     assert!(head.contains("Content-Length: 0"), "{head}");
     assert!(body.is_empty());
+}
+
+#[test]
+fn test_serve_target_with_matching_etag_is_not_modified() {
+    let mut writer = TestWriter::new();
+    let headers = Headers {
+        if_none_match: Some(0xDEAD_BEEF),
+        ..accepting(GZIP_ACCEPTED)
+    };
+    run_with_fixture(&mut writer, 4096, "index.html", headers, |mut entry| {
+        entry.crc32 = 0xDEAD_BEEF;
+        entry
+    });
+    let (head, body) = split_response(&writer.written);
+
+    assert!(head.starts_with("HTTP/1.1 304 Not Modified"), "{head}");
+    assert!(head.contains("ETag: \"deadbeef\""), "{head}");
+    assert!(body.is_empty());
+}
+
+#[test]
+fn test_serve_target_with_stale_etag_is_served_whole() {
+    let mut writer = TestWriter::new();
+    let headers = Headers {
+        if_none_match: Some(0xDEAD_BEEF),
+        ..accepting(GZIP_ACCEPTED)
+    };
+    let entry = run_with_fixture(&mut writer, 4096, "metadata.opf", headers, |mut entry| {
+        entry.crc32 = 0xFEED_FACE;
+        entry
+    });
+    let (head, body) = split_response(&writer.written);
+
+    assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
+    assert!(head.contains("ETag: \"feedface\""), "{head}");
+    assert_eq!(body.len() as u64, entry.compressed_size + 18);
 }
 
 /// A compressed entry whose stream runs past the end of the archive is refused
@@ -347,12 +395,8 @@ fn test_serve_entry_reaching_past_the_archive_fails() {
             .unwrap();
         let mut entry = fixture_entry(&archive, "index.html");
         entry.compressed_size = 1 << 20;
-        let node = FsTreeNode::File {
-            name: entry.name.clone(),
-            entry,
-        };
         ResponseStream::new(&mut writer, make_buf(SMALL_BUF))
-            .serve_node(&file, &node, GZIP_ACCEPTED)
+            .serve_target(&file, Target::Entry(&entry), accepting(GZIP_ACCEPTED))
             .await
             .0
             .expect_err("should refuse to serve past the archive's end")
@@ -367,7 +411,7 @@ fn test_zstd_entry_is_passed_through_when_accepted() {
         &mut writer,
         4096,
         "index.html",
-        ZSTD_ACCEPTED,
+        accepting(ZSTD_ACCEPTED),
         |mut entry| {
             entry.method = ZipMethod::Zstd;
             entry.compressed_size = 512;
@@ -395,14 +439,10 @@ fn test_zstd_entry_is_not_announced_when_unaccepted() {
             .unwrap();
         let mut entry = fixture_entry(&archive, "index.html");
         entry.method = ZipMethod::Zstd;
-        let node = FsTreeNode::File {
-            name: entry.name.clone(),
-            entry,
-        };
         // However this ends -- 500 without a zstd decoder, a decode attempt with one --
         // the client must not be told the body is zstd.
         let _ = ResponseStream::new(&mut writer, make_buf(4096))
-            .serve_node(&file, &node, NOTHING_ACCEPTED)
+            .serve_target(&file, Target::Entry(&entry), accepting(NOTHING_ACCEPTED))
             .await;
     });
     let head = String::from_utf8_lossy(&writer.written);
@@ -456,7 +496,7 @@ fn run_with_fixture(
     writer: &mut TestWriter,
     buflen: usize,
     name: &str,
-    accepted_encodings: AcceptedEncodings,
+    headers: Headers,
     adjust: impl FnOnce(Entry) -> Entry,
 ) -> Entry {
     run(async {
@@ -465,16 +505,19 @@ fn run_with_fixture(
             .await
             .unwrap();
         let entry = adjust(fixture_entry(&archive, name));
-        let node = FsTreeNode::File {
-            name: entry.name.clone(),
-            entry: entry.clone(),
-        };
         ResponseStream::new(writer, make_buf(buflen))
-            .serve_node(&file, &node, accepted_encodings)
+            .serve_target(&file, Target::Entry(&entry), headers)
             .await
             .unwrap();
         entry
     })
+}
+
+fn accepting(accepted_encodings: AcceptedEncodings) -> Headers {
+    Headers {
+        accepted_encodings,
+        ..Headers::default()
+    }
 }
 
 fn fixture_entry(archive: &rc_zip::parse::Archive, name: &str) -> Entry {

@@ -16,9 +16,9 @@ use rc_zip::{
 use crate::{
     Buf,
     buf_result::{bail_traced, buf_try_traced},
-    fstree::FsTreeNode,
+    fstree::{FsTreeNode, Target},
     rc_zip_compio::{find_entry_compressed_data, is_method_supported},
-    request::AcceptedEncodings,
+    request::{AcceptedEncodings, Headers},
     response::status::HttpStatus,
 };
 
@@ -383,30 +383,26 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         }
     }
 
-    pub async fn serve_node(
+    pub async fn serve_target(
         self,
         file: &File,
-        node: &FsTreeNode,
-        accepted_encodings: AcceptedEncodings,
+        target: Target<'_>,
+        headers: Headers,
     ) -> BufResult<(), Self> {
-        match node {
-            FsTreeNode::File { entry, .. } => {
-                self.serve_entry(file, entry, accepted_encodings).await
+        match target {
+            Target::Entry(entry) if headers.if_none_match == Some(entry.crc32) => {
+                tracing::debug!("etag matches");
+                self.serve_not_modified(entry.crc32).await
             }
-            FsTreeNode::Dir {
-                children,
-                index_html_index: Some(idx),
-                ..
-            } if let FsTreeNode::File { entry, .. } = &children[*idx] => {
-                self.serve_entry(file, entry, accepted_encodings).await
+            Target::Entry(entry) => {
+                self.serve_entry(file, entry, headers.accepted_encodings)
+                    .await
             }
-            FsTreeNode::Dir {
-                is_root, children, ..
-            } => self.serve_index(*is_root, children).await,
+            Target::Listing { is_root, children } => self.serve_index(is_root, children).await,
         }
     }
 
-    pub async fn serve_not_modified(mut self, crc32: u32) -> BufResult<(), Self> {
+    pub(super) async fn serve_not_modified(mut self, crc32: u32) -> BufResult<(), Self> {
         const NOT_MODIFIED_TEMPLATE: &[u8] =
             b"HTTP/1.1 304 Not Modified\r\nETag: \"xxxxxxxx\"\r\n\r\n";
         const CRC_OFFSET: usize =
