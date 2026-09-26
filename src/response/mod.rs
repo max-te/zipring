@@ -36,25 +36,27 @@ pub async fn respond<W: AsyncWriteExt>(
                 .and_then(|path| tree.find(path));
 
             let s = ResponseStream::new(stream, buf);
-            let Some(node) = node else {
-                return s
-                    .serve_status(HttpStatus::NotFound)
-                    .instrument(respond_span.exit())
-                    .await
-                    .map_buffer(ResponseStream::into_buf);
-            };
-            if let Some(crc32) = headers.if_none_match
-                && let Some(entry) = node.entry()
-                && entry.crc32 == crc32
-            {
-                tracing::debug!("etag matches");
-                s.serve_not_modified(entry.crc32)
-                    .instrument(respond_span.exit())
-                    .await
-            } else {
-                s.serve_node(file, node, headers.accepted_encodings)
-                    .instrument(respond_span.exit())
-                    .await
+            match node {
+                None => {
+                    s.serve_status(HttpStatus::NotFound)
+                        .instrument(respond_span.exit())
+                        .await
+                }
+                Some(node)
+                    if let Some(crc32) = headers.if_none_match
+                        && let Some(entry) = node.entry()
+                        && entry.crc32 == crc32 =>
+                {
+                    tracing::debug!("etag matches");
+                    s.serve_not_modified(entry.crc32)
+                        .instrument(respond_span.exit())
+                        .await
+                }
+                Some(node) => {
+                    s.serve_node(file, node, headers.accepted_encodings)
+                        .instrument(respond_span.exit())
+                        .await
+                }
             }
         }
         Request::Bad { status } => {
