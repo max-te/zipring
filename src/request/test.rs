@@ -441,3 +441,66 @@ fn test_parse_too_many_headers() {
         );
     });
 }
+
+/// The encodings a request with `lines` among its headers accepts.
+fn accepted(lines: &str) -> AcceptedEncodings {
+    let mut accepted = None;
+    run(async {
+        let data = format!("GET / HTTP/1.1\r\n{lines}\r\n").into_bytes();
+        let mut reader = TestReader::new(data);
+        let (result, _) = expect_request(parse_one(&mut reader, make_buf(1024)).await);
+        let Request::Get { headers, .. } = result else {
+            panic!("{lines:?} should parse");
+        };
+        accepted = Some(headers.accepted_encodings);
+    });
+    accepted.unwrap()
+}
+
+fn assert_accepts(lines: &str, gzip: bool, zstd: bool) {
+    let AcceptedEncodings {
+        gzip: got_gzip,
+        zstd: got_zstd,
+    } = accepted(lines);
+    assert_eq!((got_gzip, got_zstd), (gzip, zstd), "{lines:?}");
+}
+
+#[test]
+fn test_accept_encoding_q_zero_refuses() {
+    assert_accepts("Accept-Encoding: gzip;q=0, zstd\r\n", false, true);
+    assert_accepts("Accept-Encoding: gzip; q=0.000\r\n", false, false);
+    assert_accepts("Accept-Encoding: gzip;Q=0.0\r\n", false, false);
+    assert_accepts("Accept-Encoding: gzip;q=0.001\r\n", true, false);
+    assert_accepts("Accept-Encoding: gzip;q=1\r\n", true, false);
+}
+
+/// Codings are tokens, compared whole and without regard to case.
+#[test]
+fn test_accept_encoding_names_match_whole_and_caseless() {
+    assert_accepts("Accept-Encoding: GZIP, Zstd\r\n", true, true);
+    assert_accepts("Accept-Encoding: x-gzip\r\n", true, false);
+    assert_accepts("Accept-Encoding: gzipper, notzstd\r\n", false, false);
+    assert_accepts("Accept-Encoding: \r\n", false, false);
+}
+
+#[test]
+fn test_accept_encoding_wildcard_covers_only_unnamed_codings() {
+    assert_accepts("Accept-Encoding: *\r\n", true, true);
+    assert_accepts("Accept-Encoding: gzip;q=0, *\r\n", false, true);
+    assert_accepts("Accept-Encoding: *;q=0, zstd\r\n", false, true);
+}
+
+/// Several field lines read as one comma-separated list.
+#[test]
+fn test_accept_encoding_lines_combine() {
+    assert_accepts(
+        "Accept-Encoding: gzip\r\nAccept-Encoding: zstd\r\n",
+        true,
+        true,
+    );
+    assert_accepts(
+        "Accept-Encoding: *\r\nAccept-Encoding: gzip;q=0\r\n",
+        false,
+        true,
+    );
+}

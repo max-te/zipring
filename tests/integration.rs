@@ -532,15 +532,18 @@ fn test_content_encoding_decompressed() {
     let zip_path = PathBuf::from(TEST_FILE);
     let server = start_server(zip_path);
 
-    let (headers, body) = make_request(&server, "/index.html", "brotli").expect("Request failed");
-    assert!(headers.contains("200 OK"));
-    assert!(
-        !headers.contains("Content-Encoding:"),
-        "Files should be served decompressed when client doesn't support compression"
-    );
-    assert!(!body.is_empty(), "content should have body");
-    let body = String::from_utf8(body).expect("should be valid utf8");
-    assert!(body.ends_with("</html>"));
+    for encodings in ["brotli", "gzip;q=0"] {
+        let (headers, body) =
+            make_request(&server, "/index.html", encodings).expect("Request failed");
+        assert!(headers.contains("200 OK"), "{encodings}: {headers}");
+        assert!(
+            !headers.contains("Content-Encoding:"),
+            "{encodings}: Files should be served decompressed when client doesn't support compression"
+        );
+        assert!(!body.is_empty(), "content should have body");
+        let body = String::from_utf8(body).expect("should be valid utf8");
+        assert!(body.ends_with("</html>"));
+    }
 }
 
 #[test]

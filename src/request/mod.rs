@@ -10,13 +10,57 @@ pub struct AcceptedEncodings {
     pub zstd: bool,
 }
 
-impl AcceptedEncodings {
-    pub fn from_header(header: &httparse::Header) -> Self {
-        let value = std::str::from_utf8(header.value).unwrap_or_default();
-        let gzip = value.contains("gzip");
-        let zstd = value.contains("zstd");
+/// What the `Accept-Encoding` lines of a request say, so far, about each coding.
+#[derive(Default)]
+struct EncodingVerdicts {
+    gzip: Option<bool>,
+    zstd: Option<bool>,
+    wildcard: Option<bool>,
+}
 
-        Self { gzip, zstd }
+impl EncodingVerdicts {
+    /// Reads one field line; several lines read as one comma-separated list.
+    fn read(&mut self, value: &[u8]) {
+        for element in value.split(|&b| b == b',') {
+            let mut parts = element.split(|&b| b == b';');
+            let coding = parts.next().unwrap_or_default().trim_ascii();
+            let acceptable = !parts.any(is_zero_qvalue);
+            let verdict =
+                if coding.eq_ignore_ascii_case(b"gzip") || coding.eq_ignore_ascii_case(b"x-gzip") {
+                    &mut self.gzip
+                } else if coding.eq_ignore_ascii_case(b"zstd") {
+                    &mut self.zstd
+                } else if coding == b"*" {
+                    &mut self.wildcard
+                } else {
+                    continue;
+                };
+            *verdict = Some(acceptable);
+        }
+    }
+
+    fn accepted(&self) -> AcceptedEncodings {
+        let decide = |named: Option<bool>| named.or(self.wildcard).unwrap_or(false);
+        AcceptedEncodings {
+            gzip: decide(self.gzip),
+            zstd: decide(self.zstd),
+        }
+    }
+}
+
+/// Whether `param` is a `q` weight of zero, which refuses its coding.
+fn is_zero_qvalue(param: &[u8]) -> bool {
+    let mut halves = param.splitn(2, |&b| b == b'=');
+    let (Some(name), Some(weight)) = (halves.next(), halves.next()) else {
+        return false;
+    };
+    if !name.trim_ascii().eq_ignore_ascii_case(b"q") {
+        return false;
+    }
+    match weight.trim_ascii() {
+        [b'0'] => true,
+        [b'0', b'.', decimals @ ..] => decimals.len() <= 3 && decimals.iter().all(|&d| d == b'0'),
+        _ => false,
     }
 }
 
@@ -253,6 +297,7 @@ fn find_headers_end(bytes: &[u8]) -> Option<usize> {
 
 fn extract_headers(parsed_headers: &mut [httparse::Header<'_>]) -> Headers {
     let mut headers = Headers::default();
+    let mut encoding_verdicts = EncodingVerdicts::default();
     for h in parsed_headers {
         if h.name.eq_ignore_ascii_case("if-none-match") && h.value.len() == 10 {
             let hex_part = &h.value[1..9];
@@ -261,13 +306,14 @@ fn extract_headers(parsed_headers: &mut [httparse::Header<'_>]) -> Headers {
                 headers.if_none_match = Some(crc32);
             }
         } else if h.name.eq_ignore_ascii_case("accept-encoding") {
-            headers.accepted_encodings = AcceptedEncodings::from_header(h);
+            encoding_verdicts.read(h.value);
         } else if h.name.eq_ignore_ascii_case("connection")
             && h.value.eq_ignore_ascii_case(b"close")
         {
             headers.close = true;
         }
     }
+    headers.accepted_encodings = encoding_verdicts.accepted();
     headers
 }
 
