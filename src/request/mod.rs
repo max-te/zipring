@@ -1,10 +1,8 @@
-use std::fmt::Debug;
-
 use compio::BufResult;
-use compio::buf::{IntoInner, IoBuf, Slice};
+use compio::buf::{IntoInner, IoBuf};
 use compio::io::AsyncReadExt;
 
-use crate::{Buf, response::status::HttpStatus};
+use crate::{Buf, buf_result::bail_traced, response::status::HttpStatus};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AcceptedEncodings {
@@ -22,9 +20,16 @@ impl AcceptedEncodings {
     }
 }
 
+#[derive(Debug)]
 pub enum Request {
-    Get { path: Slice<Buf>, headers: Headers },
-    Bad { status: HttpStatus, buf: Buf },
+    Get {
+        /// Length of the decoded path at the front of the buffer that came with it.
+        path_len: usize,
+        headers: Headers,
+    },
+    Bad {
+        status: HttpStatus,
+    },
 }
 
 impl Request {
@@ -46,25 +51,6 @@ pub struct Headers {
     pub close: bool,
 }
 
-impl Debug for Request {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Request::Get { path, headers } => f
-                .debug_struct("Get")
-                .field("path", &String::from_utf8_lossy(path))
-                .field("if_none_match", &headers.if_none_match)
-                .field("accepted_encodings", &headers.accepted_encodings)
-                .field("close", &headers.close)
-                .finish(),
-            Request::Bad { status, buf } => f
-                .debug_struct("Bad")
-                .field("status", status)
-                .field("buf", buf)
-                .finish(),
-        }
-    }
-}
-
 /// Holds a connection's request bytes, which arrive on their own schedule: one request
 /// may take several reads, and one read may deliver several requests.
 ///
@@ -83,7 +69,7 @@ pub const REQUEST_BUF_SIZE: usize = 8 * 1024;
 
 enum Fill {
     Read,
-    /// The peer closed, or the connection failed.
+    /// The peer closed.
     Closed,
     /// The buffer holds an unterminated request and has no room left.
     Full,
@@ -105,14 +91,16 @@ impl RequestReader {
     /// Parse the next request, reading from `stream` only when the bytes already in
     /// hand do not hold a whole one.
     ///
-    /// The decoded path is copied into `response_buf`, which the returned request
-    /// carries onwards -- so nothing the caller holds refers to this reader's bytes,
+    /// The decoded path is copied into the front of `response_buf`, which comes back
+    /// beside the request -- so nothing the caller holds refers to this reader's bytes,
     /// and the next request may sit here untouched while this one is answered.
+    ///
+    /// Yields `None` once the peer has closed.
     pub async fn next_request<R: AsyncReadExt>(
         &mut self,
         stream: &mut R,
-        response_buf: Buf,
-    ) -> Result<Request, Buf> {
+        mut response_buf: Buf,
+    ) -> BufResult<Option<Request>, Buf> {
         let mut scanned = self.consumed;
         let request_end = loop {
             if let Some(end) = find_headers_end(&self.buf[scanned..self.filled]) {
@@ -126,28 +114,29 @@ impl RequestReader {
 
             let consumed_before = self.consumed;
             match self.fill(stream).await {
-                Fill::Read => {}
-                Fill::Closed => return Err(response_buf),
-                Fill::Full => {
+                Ok(Fill::Read) => {}
+                Ok(Fill::Closed) => return BufResult(Ok(None), response_buf),
+                Ok(Fill::Full) => {
                     tracing::error!("request fills the buffer without ending");
                     break self.filled;
                 }
+                Err(err) => bail_traced!(err, response_buf),
             }
             // A compaction inside fill() shifts what is left toward the front.
             scanned -= consumed_before - self.consumed;
         };
 
-        let request = self.parse(request_end, response_buf);
+        let request = self.parse(request_end, &mut response_buf);
         if self.consumed == self.filled {
             // Nothing pipelined behind it: start the next request at the front.
             self.consumed = 0;
             self.filled = 0;
         }
-        request
+        BufResult(Ok(request), response_buf)
     }
 
     /// Parse one request out of `self.buf[self.consumed..end]`, advancing past it.
-    fn parse(&mut self, end: usize, response_buf: Buf) -> Result<Request, Buf> {
+    fn parse(&mut self, end: usize, response_buf: &mut [u8]) -> Option<Request> {
         let raw = &self.buf[self.consumed..end];
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let parsed = try_parse_http(raw, &mut headers);
@@ -160,39 +149,42 @@ impl RequestReader {
             ..
         } = match parsed {
             Ok(value) => value,
-            Err(Some(status)) => return Ok(bad(status, response_buf)),
-            Err(None) => return Err(response_buf),
+            Err(Some(status)) => return Some(Request::Bad { status }),
+            Err(None) => return None,
         };
 
         let Some(path) = path else {
             tracing::error!("no path");
-            return Ok(bad(HttpStatus::BadRequest, response_buf));
+            return Some(Request::Bad {
+                status: HttpStatus::BadRequest,
+            });
         };
 
         if method != Some("GET") {
             tracing::error!("unsupported method");
-            return Ok(bad(HttpStatus::MethodNotAllowed, response_buf));
+            return Some(Request::Bad {
+                status: HttpStatus::MethodNotAllowed,
+            });
         }
         tracing::info!(?path, "GET request");
 
         let headers = extract_headers(headers);
-        let path = match decode_path(path.as_bytes(), response_buf) {
-            Ok(path) => path,
-            Err(response_buf) => {
-                tracing::error!("decode path failed");
-                return Ok(bad(HttpStatus::UriTooLong, response_buf));
-            }
+        let Some(path_len) = decode_path(path.as_bytes(), response_buf) else {
+            tracing::error!("decode path failed");
+            return Some(Request::Bad {
+                status: HttpStatus::UriTooLong,
+            });
         };
 
-        Ok(Request::Get { path, headers })
+        Some(Request::Get { path_len, headers })
     }
 
     /// Read once, making room first if the buffer has none left.
-    async fn fill<R: AsyncReadExt>(&mut self, stream: &mut R) -> Fill {
+    async fn fill<R: AsyncReadExt>(&mut self, stream: &mut R) -> std::io::Result<Fill> {
         let capacity = self.buf.len();
         if self.filled == capacity {
             if self.consumed == 0 {
-                return Fill::Full;
+                return Ok(Fill::Full);
             }
             self.buf.copy_within(self.consumed..self.filled, 0);
             self.filled -= self.consumed;
@@ -203,16 +195,15 @@ impl RequestReader {
         let BufResult(res, slice) = stream.read(buf.slice(self.filled..capacity)).await;
         self.buf = slice.into_inner();
 
-        match res {
-            Ok(0) => {
+        match res? {
+            0 => {
                 tracing::debug!("read 0 bytes");
-                Fill::Closed
+                Ok(Fill::Closed)
             }
-            Ok(n) => {
+            n => {
                 self.filled += n;
-                Fill::Read
+                Ok(Fill::Read)
             }
-            Err(_) => Fill::Closed,
         }
     }
 }
@@ -250,10 +241,6 @@ fn try_parse_http<'h, 'b>(
     Ok(req)
 }
 
-fn bad(status: HttpStatus, buf: Buf) -> Request {
-    Request::Bad { status, buf }
-}
-
 const HEADERS_END: &[u8] = b"\r\n\r\n";
 
 /// Where the headers end, as an index just past the terminator.
@@ -285,18 +272,18 @@ fn extract_headers(parsed_headers: &mut [httparse::Header<'_>]) -> Headers {
 }
 
 /// Percent-decode the raw path into the front of `buf`, which the response is built
-/// over once the path has served its purpose.
-fn decode_path(raw: &[u8], mut buf: Buf) -> Result<Slice<Buf>, Buf> {
+/// over once the path has served its purpose. Returns the decoded length.
+fn decode_path(raw: &[u8], buf: &mut [u8]) -> Option<usize> {
     let mut len = 0;
     for byte in percent_encoding::percent_decode(raw) {
         if len == buf.len() {
             tracing::error!("path too long for buffer");
-            return Err(buf);
+            return None;
         }
         buf[len] = byte;
         len += 1;
     }
-    Ok(buf.slice(..len))
+    Some(len)
 }
 
 #[cfg(test)]

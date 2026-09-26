@@ -2,7 +2,6 @@ use crate::fstree::FsTreeNode;
 use crate::request::Request;
 use crate::response::status::HttpStatus;
 use compio::BufResult;
-use compio::buf::IntoInner;
 use compio::fs::File;
 use compio::io::AsyncWriteExt;
 use tracing::Instrument as _;
@@ -18,14 +17,15 @@ mod test;
 
 pub async fn respond<W: AsyncWriteExt>(
     request: Request,
+    buf: Buf,
     file: &File,
     tree: &FsTreeNode,
     stream: &mut W,
 ) -> BufResult<(), Buf> {
     let respond_span = tracing::info_span!("response", path = field::Empty).entered();
     match request {
-        Request::Get { path, headers } => {
-            let node = str::from_utf8(&path)
+        Request::Get { path_len, headers } => {
+            let node = str::from_utf8(&buf[..path_len])
                 .inspect(|path| {
                     respond_span.record("path", path);
                 })
@@ -35,7 +35,7 @@ pub async fn respond<W: AsyncWriteExt>(
                 .ok()
                 .and_then(|path| tree.find(path));
 
-            let s = ResponseStream::new(stream, path.into_inner());
+            let s = ResponseStream::new(stream, buf);
             let Some(node) = node else {
                 return s
                     .serve_status(HttpStatus::NotFound)
@@ -57,7 +57,7 @@ pub async fn respond<W: AsyncWriteExt>(
                     .await
             }
         }
-        Request::Bad { buf, status } => {
+        Request::Bad { status } => {
             ResponseStream::new(stream, buf)
                 .serve_status(status)
                 .instrument(respond_span.exit())

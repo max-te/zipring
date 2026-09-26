@@ -268,16 +268,15 @@ async fn serve(stream: TcpStream, file: File, tree: &FsTreeNode, buf_pool: BufPo
     let mut reader = RequestReader::new();
     let mut buf = take_buf(&buf_pool);
     loop {
-        let request = match reader.next_request(&mut stream_read, buf).await {
-            Ok(request) => request,
-            Err(buf) => {
-                return_buf(&buf_pool, buf);
-                break;
-            }
+        let request;
+        BufResult(request, buf) = reader.next_request(&mut stream_read, buf).await;
+        let Ok(Some(request)) = request else {
+            return_buf(&buf_pool, buf);
+            break;
         };
         let keep_alive = request.keep_alive();
         let res;
-        BufResult(res, buf) = respond(request, &file, tree, &mut stream_write).await;
+        BufResult(res, buf) = respond(request, buf, &file, tree, &mut stream_write).await;
         if let Err(e) = res {
             tracing::error!("error responding: {:?}", e);
             return_buf(&buf_pool, buf);
