@@ -96,6 +96,14 @@ const fn chunk_limit(buflen: usize) -> usize {
     buflen - 2 - HTTP_CHUNK_TERMINATOR.len()
 }
 
+/// An HTTP chunk being assembled in the buffer: `len` payload bytes staged at
+/// `prefix + HTTP_CHUNK_SIZE_LEN`, behind whatever occupies `buf[..prefix]`.
+#[derive(Clone, Copy)]
+struct PendingChunk {
+    prefix: usize,
+    len: usize,
+}
+
 const URI_FRAGMENT_ENCODING_SET: &AsciiSet =
     &CONTROLS.add(b' ').add(b'"').add(b'<').add(b'>').add(b'`');
 
@@ -140,17 +148,13 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         BufResult(res, self)
     }
 
-    /// Frames the `len` payload bytes staged at `prefix + HTTP_CHUNK_SIZE_LEN` as an HTTP
-    /// chunk and writes the buffer from its very start, so that whatever occupies
-    /// `buf[..prefix]` -- the response header, on the first chunk -- leaves in the same write.
+    /// Frames `chunk` and writes the buffer from its very start, so that whatever occupies
+    /// `buf[..chunk.prefix]` -- the response header, on the first chunk -- leaves in the
+    /// same write.
     ///
     /// The final chunk carries the terminator along with it.
-    async fn flush_chunk(
-        mut self,
-        prefix: usize,
-        len: usize,
-        is_last: bool,
-    ) -> BufResult<(), Self> {
+    async fn flush_chunk(mut self, chunk: PendingChunk, is_last: bool) -> BufResult<(), Self> {
+        let PendingChunk { prefix, len } = chunk;
         let buf = &mut self.buf;
         let payload_end = prefix + HTTP_CHUNK_SIZE_LEN + len;
         buf[payload_end] = b'\r';
@@ -173,27 +177,25 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         self.write_buf(..end).await
     }
 
-    /// Appends `args` to the chunk payload staged at `prefix + HTTP_CHUNK_SIZE_LEN`,
-    /// flushing that chunk first when it cannot hold `args` whole.
+    /// Appends `args` to `chunk`, flushing it first when it cannot hold `args` whole,
+    /// and returns the chunk left pending.
     async fn append_fmt_chunked(
         mut self,
-        prefix: &mut usize,
-        staged: &mut usize,
+        mut chunk: PendingChunk,
         args: fmt::Arguments<'_>,
-    ) -> BufResult<(), Self> {
+    ) -> BufResult<PendingChunk, Self> {
         let limit = chunk_limit(self.buf.len());
         loop {
-            let payload = &mut self.buf[*prefix + HTTP_CHUNK_SIZE_LEN..limit];
-            match append_fmt(payload, staged, args) {
-                Ok(()) => return BufResult(Ok(()), self),
+            let payload = &mut self.buf[chunk.prefix + HTTP_CHUNK_SIZE_LEN..limit];
+            match append_fmt(payload, &mut chunk.len, args) {
+                Ok(()) => return BufResult(Ok(chunk), self),
                 // Not even an empty chunk can hold `args`.
-                Err(e) if *staged == 0 => bail_traced!(e, self),
+                Err(e) if chunk.len == 0 => bail_traced!(e, self),
                 Err(_) => {
-                    ((), self) = buf_try_traced!(self.flush_chunk(*prefix, *staged, false).await);
+                    ((), self) = buf_try_traced!(self.flush_chunk(chunk, false).await);
                 }
             }
-            *prefix = 0;
-            *staged = 0;
+            chunk = PendingChunk { prefix: 0, len: 0 };
         }
     }
 
@@ -305,22 +307,20 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         );
 
         // The header rides along with the first chunk.
-        let mut prefix = INDEX_HEADER.len();
-        self.buf[..prefix].copy_from_slice(INDEX_HEADER);
+        self.buf[..INDEX_HEADER.len()].copy_from_slice(INDEX_HEADER);
+        let mut chunk = PendingChunk {
+            prefix: INDEX_HEADER.len(),
+            len: 0,
+        };
 
-        let mut staged = 0;
         let top = if is_root {
             ""
         } else {
             "<li class=top><a href=\"..\">..</a>\n"
         };
-        ((), self) = buf_try!(
-            self.append_fmt_chunked(
-                &mut prefix,
-                &mut staged,
-                format_args!("{INDEX_PREAMBLE}{top}")
-            )
-            .await
+        (chunk, self) = buf_try!(
+            self.append_fmt_chunked(chunk, format_args!("{INDEX_PREAMBLE}{top}"))
+                .await
         );
 
         let dirs = entries.iter().filter_map(|entry| match entry {
@@ -332,10 +332,9 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
             FsTreeNode::Dir { .. } => None,
         });
         for (name, class, slash) in dirs.chain(files) {
-            ((), self) = buf_try!(
+            (chunk, self) = buf_try!(
                 self.append_fmt_chunked(
-                    &mut prefix,
-                    &mut staged,
+                    chunk,
                     format_args!(
                         "<li{class}><a href=\"./{name_url}{slash}\">{name_html}</a>\n",
                         name_url = utf8_percent_encode(name, URI_FRAGMENT_ENCODING_SET),
@@ -346,7 +345,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
             );
         }
 
-        ((), self) = buf_try_traced!(self.flush_chunk(prefix, staged, true).await);
+        ((), self) = buf_try_traced!(self.flush_chunk(chunk, true).await);
         BufResult(Ok(()), self)
     }
 
