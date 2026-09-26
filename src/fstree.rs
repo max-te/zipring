@@ -23,6 +23,8 @@ pub(crate) enum Target<'a, E: Clone = Entry> {
         is_root: bool,
         children: &'a [FsTreeNode<E>],
     },
+    /// A directory asked for without its trailing slash, by its last segment.
+    Redirect { name: &'a str },
 }
 
 impl<E: Clone> std::fmt::Debug for FsTreeNode<E> {
@@ -132,6 +134,11 @@ impl<E: Clone> FsTreeNode<E> {
     pub(crate) fn resolve(&self, path: &str) -> Option<Target<'_, E>> {
         let target = match self.find(path)? {
             FsTreeNode::File { entry, .. } => Target::Entry(entry),
+            FsTreeNode::Dir {
+                name,
+                is_root: false,
+                ..
+            } if !path.ends_with('/') => Target::Redirect { name },
             FsTreeNode::Dir {
                 children,
                 index_html_index: Some(idx),
@@ -411,7 +418,6 @@ mod tests {
         root.insert_at(1, "a/z.txt".to_string());
         root.insert_at(2, "a/index.html".to_string());
         root.recursive_sort();
-        assert!(matches!(root.resolve("a"), Some(Target::Entry(2))));
         assert!(matches!(root.resolve("a/"), Some(Target::Entry(2))));
     }
 
@@ -419,7 +425,7 @@ mod tests {
     fn test_resolve_dir_without_index_html_to_a_listing() {
         let mut root = FsTreeNode::<i32>::root();
         root.insert_at(1, "a/b.txt".to_string());
-        let Some(Target::Listing { is_root, children }) = root.resolve("a") else {
+        let Some(Target::Listing { is_root, children }) = root.resolve("a/") else {
             panic!("a should be listed");
         };
         assert!(!is_root);
@@ -438,6 +444,19 @@ mod tests {
         root.insert_at(1, "index.html/x.txt".to_string());
         root.insert_at(2, "index.html".to_string());
         root.recursive_sort();
+        assert!(matches!(root.resolve(""), Some(Target::Listing { .. })));
+    }
+
+    /// Even a directory standing in for its `index.html` is redirected, lest the
+    /// page's own relative links miss.
+    #[test]
+    fn test_resolve_dir_without_trailing_slash_to_a_redirect() {
+        let mut root = FsTreeNode::<i32>::root();
+        root.insert_at(1, "a/b/index.html".to_string());
+        assert!(matches!(
+            root.resolve("a/b"),
+            Some(Target::Redirect { name: "b" })
+        ));
         assert!(matches!(root.resolve(""), Some(Target::Listing { .. })));
     }
 

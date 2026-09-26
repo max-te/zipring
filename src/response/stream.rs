@@ -399,7 +399,24 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
                     .await
             }
             Target::Listing { is_root, children } => self.serve_index(is_root, children).await,
+            Target::Redirect { name } => self.serve_redirect_into_dir(name).await,
         }
+    }
+
+    /// Answers with a `Location` relative to the request, so that only the last
+    /// segment needs spelling out.
+    async fn serve_redirect_into_dir(mut self, name: &str) -> BufResult<(), Self> {
+        let mut len = 0;
+        let res = append_fmt(
+            &mut self.buf,
+            &mut len,
+            format_args!(
+                "HTTP/1.1 301 Moved Permanently\r\nLocation: ./{name_url}/\r\nContent-Length: 0\r\n\r\n",
+                name_url = utf8_percent_encode(name, URI_FRAGMENT_ENCODING_SET),
+            ),
+        );
+        ((), self) = buf_try_traced!(res, self);
+        self.write_buf(..len).await
     }
 
     pub(super) async fn serve_not_modified(mut self, crc32: u32) -> BufResult<(), Self> {

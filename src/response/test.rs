@@ -382,6 +382,33 @@ fn test_serve_target_with_stale_etag_is_served_whole() {
     assert_eq!(body.len() as u64, entry.compressed_size + 18);
 }
 
+#[test]
+fn test_serve_target_redirects_into_the_dir() {
+    let mut writer = TestWriter::new();
+    run(async {
+        let file = compio::fs::File::open(FIXTURE).await.unwrap();
+        ResponseStream::new(&mut writer, make_buf(1024))
+            .serve_target(
+                &file,
+                Target::Redirect { name: "a <b>" },
+                Headers::default(),
+            )
+            .await
+            .unwrap();
+    });
+    let out = String::from_utf8_lossy(&writer.written);
+    assert_eq!(
+        out.split("\r\n").collect::<Vec<_>>(),
+        vec![
+            "HTTP/1.1 301 Moved Permanently",
+            "Location: ./a%20%3Cb%3E/",
+            "Content-Length: 0",
+            "",
+            ""
+        ]
+    );
+}
+
 /// A compressed entry whose stream runs past the end of the archive is refused
 /// rather than served short.
 #[test]

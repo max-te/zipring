@@ -311,7 +311,7 @@ fn test_request_directory_images() {
     let zip_path = PathBuf::from(TEST_FILE);
     let server = start_server(zip_path);
 
-    let (headers, body) = make_request(&server, "/images", "gzip").expect("Request failed");
+    let (headers, body) = make_request(&server, "/images/", "gzip").expect("Request failed");
     let body = String::from_utf8(body).expect("Body should be UTF-8");
     assert!(
         headers.contains("200 OK"),
@@ -328,6 +328,26 @@ fn test_request_directory_images() {
     assert!(
         body.contains("000000.png"),
         "images directory listing should contain 000000.png"
+    );
+}
+
+/// Without its trailing slash, a directory's relative links would resolve
+/// against its parent.
+#[test]
+fn test_request_directory_without_trailing_slash_is_redirected() {
+    let server = start_server(PathBuf::from(TEST_FILE));
+    let (headers, body) = make_request(&server, "/images", "gzip").expect("Request failed");
+    assert!(headers.contains("301 Moved Permanently"), "{headers}");
+    assert!(headers.contains("Location: ./images/\n"), "{headers}");
+    assert!(body.is_empty());
+
+    let server = start_server(PathBuf::from(NON_ASCII_UTF8_FILE));
+    let (headers, _body) =
+        make_request(&server, "/%E5%86%99%E7%9C%9F", "gzip").expect("Request failed");
+    assert!(headers.contains("301 Moved Permanently"), "{headers}");
+    assert!(
+        headers.contains("Location: ./%E5%86%99%E7%9C%9F/\n"),
+        "{headers}"
     );
 }
 
