@@ -352,24 +352,19 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         accepted_encodings: AcceptedEncodings,
     ) -> std::io::Result<Self> {
         match node {
-            FsTreeNode::Dir {
-                name: _,
-                entry: _,
-                is_root,
-                children,
-                index_html_index,
-            } => {
-                if let Some(idx) = index_html_index
-                    && let FsTreeNode::File { entry, .. } = &children[*idx]
-                {
-                    self.serve_entry(file, entry, accepted_encodings).await
-                } else {
-                    self.serve_index(*is_root, children).await
-                }
-            }
             FsTreeNode::File { entry, .. } => {
                 self.serve_entry(file, entry, accepted_encodings).await
             }
+            FsTreeNode::Dir {
+                children,
+                index_html_index: Some(idx),
+                ..
+            } if let FsTreeNode::File { entry, .. } = &children[*idx] => {
+                self.serve_entry(file, entry, accepted_encodings).await
+            }
+            FsTreeNode::Dir {
+                is_root, children, ..
+            } => self.serve_index(*is_root, children).await,
         }
     }
 
