@@ -331,17 +331,17 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
             _ => None,
         };
 
-        if compression.is_some() || is_method_supported(entry.method) {
-            let (buf, head_len) = write_entry_header(self.buf, entry, compression.as_ref())?;
-            self.buf = buf;
-            if compression.is_some() {
-                self.send_compressed_entry(file, entry, head_len).await
-            } else {
-                self.send_decompressed_entry(file, entry, head_len).await
-            }
-        } else {
+        if compression.is_none() && !is_method_supported(entry.method) {
             tracing::error!("Unsupported compression method {:?}", entry.method);
-            self.send_status_empty("500 Unsupported Compression").await
+            return self.send_status_empty("500 Unsupported Compression").await;
+        }
+
+        let (buf, head_len) = write_entry_header(self.buf, entry, compression.as_ref())?;
+        self.buf = buf;
+        if compression.is_some() {
+            self.send_compressed_entry(file, entry, head_len).await
+        } else {
+            self.send_decompressed_entry(file, entry, head_len).await
         }
     }
 
