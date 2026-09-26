@@ -3,6 +3,7 @@ use compio::buf::{IoBuf, IoVectoredBuf};
 use compio::io::AsyncWrite;
 use rc_zip::parse::{Entry, Method as ZipMethod, Mode, Version};
 
+use super::coding::NativeCoding;
 use super::stream::*;
 use crate::Buf;
 use crate::fstree::{FsTreeNode, Target};
@@ -82,13 +83,7 @@ fn test_send_header_with_none_compression() {
 #[test]
 fn test_send_header_with_gzip_compression() {
     let entry = dummy_entry("style.css", 0xDEAD_BEEF, ZipMethod::Deflate, 1024, 4096);
-    let out = header_of(
-        &entry,
-        Some(&ContentCompression {
-            extra_len: 18,
-            encoding: "gzip",
-        }),
-    );
+    let out = header_of(&entry, Some(NativeCoding::Gzip));
     assert_eq!(
         out.split("\r\n").collect::<Vec<_>>(),
         vec![
@@ -106,14 +101,8 @@ fn test_send_header_with_gzip_compression() {
 
 #[test]
 fn test_send_header_with_zstd_compression() {
-    let entry = dummy_entry("style.css", 0xDEAD_BEEF, ZipMethod::Deflate, 1024, 4096);
-    let out = header_of(
-        &entry,
-        Some(&ContentCompression {
-            extra_len: 0,
-            encoding: "zstd",
-        }),
-    );
+    let entry = dummy_entry("style.css", 0xDEAD_BEEF, ZipMethod::Zstd, 1024, 4096);
+    let out = header_of(&entry, Some(NativeCoding::Zstd));
     assert_eq!(
         out.split("\r\n").collect::<Vec<_>>(),
         vec![
@@ -225,9 +214,9 @@ fn dummy_entry(
 }
 
 /// Render an entry's response header into a buffer and read it back as text.
-fn header_of(entry: &Entry, compression: Option<&ContentCompression>) -> String {
+fn header_of(entry: &Entry, native: Option<NativeCoding>) -> String {
     let mut buf = make_buf(2048);
-    let len = write_entry_header(&mut buf, entry, compression).unwrap();
+    let len = write_entry_header(&mut buf, entry, native).unwrap();
     String::from_utf8(buf[..len].to_vec()).unwrap()
 }
 

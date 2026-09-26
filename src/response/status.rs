@@ -5,6 +5,8 @@ pub enum HttpStatus {
     UriTooLong,
     HeaderTooLong,
     MethodNotAllowed,
+    /// An entry compressed by a method no decoder was compiled in for.
+    UnsupportedCompression,
 }
 
 impl HttpStatus {
@@ -15,6 +17,7 @@ impl HttpStatus {
             HttpStatus::UriTooLong => "414 URI Too Long",
             HttpStatus::HeaderTooLong => "431 Request Header Fields Too Large",
             HttpStatus::MethodNotAllowed => "405 Method Not Allowed",
+            HttpStatus::UnsupportedCompression => "500 Unsupported Compression",
         }
     }
 }

@@ -10,7 +10,6 @@ use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use rc_zip::{
     Entry,
     fsm::{EntryFsm, FsmResult},
-    parse::Method as CompressionMethod,
 };
 
 use crate::{
@@ -19,7 +18,7 @@ use crate::{
     fstree::{FsTreeNode, Target},
     rc_zip_compio::{find_entry_compressed_data, is_method_supported},
     request::{AcceptedEncodings, Headers},
-    response::status::HttpStatus,
+    response::{coding::NativeCoding, status::HttpStatus},
 };
 
 const HTTP_CHUNK_DIGIT_COUNT: usize = size_of::<usize>() * 2;
@@ -38,24 +37,15 @@ fn append_fmt(buf: &mut [u8], len: &mut usize, args: fmt::Arguments<'_>) -> std:
     Ok(())
 }
 
-const GZIP_HEADER: [u8; 10] = [
-    0x1f, 0x8b, // Magic number
-    0x08, // Compression method = DEFLATE
-    0x00, // No flags
-    0x00, 0x00, 0x00, 0x00, // No MTIME
-    0x00, // No extra flags
-    0xFF, // Filesystem unknown
-];
-const GZIP_TRAILER_LEN: usize = 8;
-
 /// Lays the response header out at the front of `buf`, returning its length.
+/// Without a `native` coding, the entry is announced decoded.
 ///
 /// Nothing is sent here: the body is staged behind the header so that the whole
 /// response can leave in a single write.
 pub(super) fn write_entry_header(
     buf: &mut [u8],
     entry: &Entry,
-    compression: Option<&ContentCompression>,
+    native: Option<NativeCoding>,
 ) -> std::io::Result<usize> {
     let mime_type = mime_guess::from_path(&entry.name).first_or_octet_stream();
     tracing::debug!(?mime_type);
@@ -66,15 +56,15 @@ pub(super) fn write_entry_header(
     Write::write_all(&mut cur, mime_type.essence_str().as_bytes())?;
     Write::write_all(&mut cur, b"\r\n")?;
 
-    if let Some(ContentCompression { encoding, .. }) = compression {
+    if let Some(native) = native {
         Write::write_all(&mut cur, b"Content-Encoding: ")?;
-        Write::write_all(&mut cur, encoding.as_bytes())?;
+        Write::write_all(&mut cur, native.name().as_bytes())?;
         Write::write_all(&mut cur, b"\r\n")?;
     }
 
     Write::write_all(&mut cur, b"Content-Length: ")?;
-    let content_length = match compression {
-        Some(ContentCompression { extra_len, .. }) => entry.compressed_size + extra_len,
+    let content_length = match native {
+        Some(native) => native.content_length(entry),
         None => entry.uncompressed_size,
     };
     let mut intbuf = itoa::Buffer::new();
@@ -199,6 +189,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         }
     }
 
+    /// Sends `entry` in its native coding, which it must have.
     #[tracing::instrument(skip_all)]
     async fn send_compressed_entry(
         mut self,
@@ -206,16 +197,13 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         entry: &Entry,
         head_len: usize,
     ) -> BufResult<(), Self> {
-        let is_gzip = entry.method == CompressionMethod::Deflate;
+        let native = NativeCoding::of(entry.method).expect("entry should have a native coding");
+        let prefix = native.prefix();
+        let trailer_len = native.trailer_len();
 
         let mut prefix_len = head_len;
-        let mut gzip_trailer = [0u8; GZIP_TRAILER_LEN];
-        if is_gzip {
-            self.buf[prefix_len..prefix_len + GZIP_HEADER.len()].copy_from_slice(&GZIP_HEADER);
-            prefix_len += GZIP_HEADER.len();
-            (gzip_trailer[0..4]).copy_from_slice(&entry.crc32.to_le_bytes());
-            (gzip_trailer[4..8]).copy_from_slice(&entry.uncompressed_size.to_le_bytes()[0..4]);
-        }
+        self.buf[prefix_len..prefix_len + prefix.len()].copy_from_slice(prefix);
+        prefix_len += prefix.len();
 
         let mut len =
             usize::try_from(entry.compressed_size).expect("entry size should fit into usize");
@@ -229,7 +217,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         let mut is_last = false;
         while !is_last {
             // Leaving room for the trailer lets a body that just fits still ship in one write.
-            let room = self.buf.len() - prefix_len - GZIP_TRAILER_LEN;
+            let room = self.buf.len() - prefix_len - trailer_len;
             let n = len.min(room);
             ((), self) = buf_try_traced!(
                 self.read_exact_buf_at(file, prefix_len..prefix_len + n, offset)
@@ -240,9 +228,9 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
 
             is_last = len == 0;
             let mut end = prefix_len + n;
-            if is_last && is_gzip {
-                self.buf[end..end + GZIP_TRAILER_LEN].copy_from_slice(&gzip_trailer);
-                end += GZIP_TRAILER_LEN;
+            if is_last {
+                native.write_trailer(entry, &mut self.buf[end..end + trailer_len]);
+                end += trailer_len;
             }
             ((), self) = buf_try_traced!(self.write_buf(..end).await);
             prefix_len = 0;
@@ -356,27 +344,18 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         entry: &Entry,
         accepted_encodings: AcceptedEncodings,
     ) -> BufResult<(), Self> {
-        let compression = match entry.method {
-            CompressionMethod::Deflate if accepted_encodings.gzip => Some(ContentCompression {
-                encoding: "gzip",
-                extra_len: 18,
-            }),
-            CompressionMethod::Zstd if accepted_encodings.zstd => Some(ContentCompression {
-                encoding: "zstd",
-                extra_len: 0,
-            }),
-            _ => None,
-        };
+        let native = NativeCoding::of(entry.method)
+            .filter(|native| native.is_accepted_by(accepted_encodings));
 
-        if compression.is_none() && !is_method_supported(entry.method) {
+        if native.is_none() && !is_method_supported(entry.method) {
             tracing::error!("Unsupported compression method {:?}", entry.method);
-            return self.send_status_empty("500 Unsupported Compression").await;
+            return self.serve_status(HttpStatus::UnsupportedCompression).await;
         }
 
-        let res = write_entry_header(&mut self.buf, entry, compression.as_ref());
+        let res = write_entry_header(&mut self.buf, entry, native);
         let head_len;
         (head_len, self) = buf_try_traced!(res, self);
-        if compression.is_some() {
+        if native.is_some() {
             self.send_compressed_entry(file, entry, head_len).await
         } else {
             self.send_decompressed_entry(file, entry, head_len).await
@@ -433,19 +412,18 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         self.write_buf(..NOT_MODIFIED_TEMPLATE.len()).await
     }
 
-    async fn send_status_empty(mut self, status: &'static str) -> BufResult<(), Self> {
+    pub async fn serve_status(mut self, status: HttpStatus) -> BufResult<(), Self> {
         let mut len = 0;
         let res = append_fmt(
             &mut self.buf,
             &mut len,
-            format_args!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n"),
+            format_args!(
+                "HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n",
+                status = status.as_str()
+            ),
         );
         ((), self) = buf_try_traced!(res, self);
         self.write_buf(..len).await
-    }
-
-    pub async fn serve_status(self, status: HttpStatus) -> BufResult<(), Self> {
-        self.send_status_empty(status.as_str()).await
     }
 }
 
@@ -454,11 +432,6 @@ fn encode_crc32(crc32: u32) -> [u8; const { size_of::<u32>() * 2 }] {
     const_hex::encode_to_slice(crc32.to_be_bytes(), &mut etag)
         .expect("u32 should always be encodable to 8 hex chars");
     etag
-}
-
-pub(super) struct ContentCompression {
-    pub extra_len: u64,
-    pub encoding: &'static str,
 }
 
 pub(super) const fn position(haystack: &[u8], needle: u8) -> Option<usize> {
