@@ -5,7 +5,7 @@ use std::ops::RangeBounds;
 use compio::BufResult;
 use compio::buf::{IntoInner, IoBuf};
 use compio::fs::File;
-use compio::io::{AsyncReadAt, AsyncWriteExt};
+use compio::io::{AsyncReadAt, AsyncReadAtExt, AsyncWriteExt};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use rc_zip::{
     Entry,
@@ -129,6 +129,17 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         BufResult(res, self)
     }
 
+    async fn read_exact_buf_at(
+        mut self,
+        file: &File,
+        range: impl RangeBounds<usize>,
+        offset: u64,
+    ) -> BufResult<(), Self> {
+        let BufResult(res, slice) = file.read_exact_at(self.buf.slice(range), offset).await;
+        self.buf = slice.into_inner();
+        BufResult(res, self)
+    }
+
     /// Frames the `len` payload bytes staged at `prefix + HTTP_CHUNK_SIZE_LEN` as an HTTP
     /// chunk and writes the buffer from its very start, so that whatever occupies
     /// `buf[..prefix]` -- the response header, on the first chunk -- leaves in the same write.
@@ -189,36 +200,26 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         (offset, self) = buf_try_traced!(res, self);
         tracing::debug!("found compressed data");
 
-        loop {
+        let mut is_last = false;
+        while !is_last {
             // Leaving room for the trailer lets a body that just fits still ship in one write.
             let room = self.buf.len() - prefix_len - GZIP_TRAILER_LEN;
-            let bytes_to_read = len.min(room);
-            let n;
-            (n, self) = buf_try_traced!(
-                self.read_buf_at(file, prefix_len..prefix_len + bytes_to_read, offset)
+            let n = len.min(room);
+            ((), self) = buf_try_traced!(
+                self.read_exact_buf_at(file, prefix_len..prefix_len + n, offset)
                     .await
             );
-            if n == 0 && len > 0 {
-                let eof = std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "entry ends before its compressed size",
-                );
-                bail_traced!(eof, self);
-            }
             offset += n as u64;
             len -= n;
 
+            is_last = len == 0;
             let mut end = prefix_len + n;
-            if len == 0 && is_gzip {
+            if is_last && is_gzip {
                 self.buf[end..end + GZIP_TRAILER_LEN].copy_from_slice(&gzip_trailer);
                 end += GZIP_TRAILER_LEN;
             }
             ((), self) = buf_try_traced!(self.write_buf(..end).await);
-
             prefix_len = 0;
-            if len == 0 {
-                break;
-            }
         }
 
         BufResult(Ok(()), self)
