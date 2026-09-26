@@ -268,58 +268,35 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
             Write::write_all(&mut cur, b"<li class=top><a href=\"..\">..</a>\n")?;
         }
 
-        // List directories first
-        for entry in entries {
-            if let FsTreeNode::Dir { name, .. } = entry {
-                let mut prepos = cur.position();
-                while let Err(e) = cur.write_fmt(format_args!(
-                    "<li class=dir><a href=\"./{name_url}/\">{name_html}</a>\n",
-                    name_url = utf8_percent_encode(name, URI_FRAGMENT_ENCODING_SET),
-                    name_html = v_htmlescape::escape(name),
-                )) {
-                    if prepos == 0 {
-                        return Err(e);
-                    }
-                    buf = flush_chunk(
-                        self.stream,
-                        buf,
-                        prefix,
-                        usize::try_from(prepos)
-                            .expect("response buffer should be adressable in usize"),
-                        false,
-                    )
-                    .await?;
-                    prefix = 0;
-                    cur = Cursor::new(&mut buf[HTTP_CHUNK_SIZE_LEN..chunk_limit(buflen)]);
-                    prepos = cur.position();
+        let dirs = entries.iter().filter_map(|entry| match entry {
+            FsTreeNode::Dir { name, .. } => Some((name, " class=dir", "/")),
+            FsTreeNode::File { .. } => None,
+        });
+        let files = entries.iter().filter_map(|entry| match entry {
+            FsTreeNode::File { name, .. } => Some((name, "", "")),
+            FsTreeNode::Dir { .. } => None,
+        });
+        for (name, class, slash) in dirs.chain(files) {
+            let mut prepos = cur.position();
+            while let Err(e) = cur.write_fmt(format_args!(
+                "<li{class}><a href=\"./{name_url}{slash}\">{name_html}</a>\n",
+                name_url = utf8_percent_encode(name, URI_FRAGMENT_ENCODING_SET),
+                name_html = v_htmlescape::escape(name),
+            )) {
+                if prepos == 0 {
+                    return Err(e);
                 }
-            }
-        }
-        // Then list all files
-        for entry in entries {
-            if let FsTreeNode::File { name, .. } = entry {
-                let mut prepos = cur.position();
-                while let Err(e) = cur.write_fmt(format_args!(
-                    "<li><a href=\"./{name_url}\">{name_html}</a>\n",
-                    name_url = utf8_percent_encode(name, URI_FRAGMENT_ENCODING_SET),
-                    name_html = v_htmlescape::escape(name),
-                )) {
-                    if prepos == 0 {
-                        return Err(e);
-                    }
-                    buf = flush_chunk(
-                        self.stream,
-                        buf,
-                        prefix,
-                        usize::try_from(prepos)
-                            .expect("response buffer should be adressable in usize"),
-                        false,
-                    )
-                    .await?;
-                    prefix = 0;
-                    cur = Cursor::new(&mut buf[HTTP_CHUNK_SIZE_LEN..chunk_limit(buflen)]);
-                    prepos = cur.position();
-                }
+                buf = flush_chunk(
+                    self.stream,
+                    buf,
+                    prefix,
+                    usize::try_from(prepos).expect("response buffer should be adressable in usize"),
+                    false,
+                )
+                .await?;
+                prefix = 0;
+                cur = Cursor::new(&mut buf[HTTP_CHUNK_SIZE_LEN..chunk_limit(buflen)]);
+                prepos = cur.position();
             }
         }
 
