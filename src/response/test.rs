@@ -499,6 +499,45 @@ fn test_zstd_entry_is_not_announced_when_unaccepted() {
     assert!(!head.contains("zstd"), "{head}");
 }
 
+/// Each href must be read by browsers as one path segment inside a quoted
+/// attribute, and must lead back to its name once the server decodes the path.
+#[test]
+fn test_serve_index_encodes_names_as_path_segments() {
+    let names = [
+        "a#b", "why?", "%41", "x&amp;y", "c\\d", "{e}", "sp ace", "写真",
+    ];
+    let entries: Vec<_> = names.iter().map(|name| node_file(name)).collect();
+
+    let mut writer = TestWriter::new();
+    run(async {
+        ResponseStream::new(&mut writer, make_buf(4096))
+            .serve_index(true, &entries)
+            .await
+            .unwrap();
+    });
+    let (_head, framed) = split_response(&writer.written);
+    let body = String::from_utf8(decode_chunked(&framed)).unwrap();
+
+    let hrefs: Vec<&str> = body
+        .split("href=\"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .collect();
+    assert_eq!(hrefs.len(), names.len(), "{body}");
+    for (href, name) in hrefs.into_iter().zip(names) {
+        let segment = href.strip_prefix("./").expect("href should be relative");
+        assert!(
+            !segment.contains(['#', '?', '&', '\\', '/', ' ', '{', '}']),
+            "{name:?} -> {href}"
+        );
+        assert_eq!(
+            percent_encoding::percent_decode_str(segment).decode_utf8_lossy(),
+            name,
+            "{href}"
+        );
+    }
+}
+
 /// A listing too long for one chunk is split, and every chunk must be framed
 /// correctly for the client to reassemble the original document.
 #[test]

@@ -94,8 +94,22 @@ struct PendingChunk {
     len: usize,
 }
 
-const URI_FRAGMENT_ENCODING_SET: &AsciiSet =
-    &CONTROLS.add(b' ').add(b'"').add(b'<').add(b'>').add(b'`');
+/// Keeps an entry name one path segment for browsers -- WHATWG's path set, plus
+/// `\`, which they read as `/` -- safe in a quoted HTML attribute (`&`), and
+/// intact through the server's own percent-decoding (`%`).
+const PATH_SEGMENT_ENCODING_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'&')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'\\')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}');
 
 pub struct ResponseStream<'w, W: AsyncWriteExt> {
     stream: &'w mut W,
@@ -325,7 +339,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
                     chunk,
                     format_args!(
                         "<li{class}><a href=\"./{name_url}{slash}\">{name_html}</a>\n",
-                        name_url = utf8_percent_encode(name, URI_FRAGMENT_ENCODING_SET),
+                        name_url = utf8_percent_encode(name, PATH_SEGMENT_ENCODING_SET),
                         name_html = v_htmlescape::escape(name),
                     ),
                 )
@@ -391,7 +405,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
             &mut len,
             format_args!(
                 "HTTP/1.1 301 Moved Permanently\r\nLocation: ./{name_url}/\r\nContent-Length: 0\r\n\r\n",
-                name_url = utf8_percent_encode(name, URI_FRAGMENT_ENCODING_SET),
+                name_url = utf8_percent_encode(name, PATH_SEGMENT_ENCODING_SET),
             ),
         );
         ((), self) = buf_try_traced!(res, self);
