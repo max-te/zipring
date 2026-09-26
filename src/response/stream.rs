@@ -155,8 +155,9 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
 
         let mut len =
             usize::try_from(entry.compressed_size).expect("entry size should fit into usize");
-        let (mut offset, scratch) =
-            find_entry_compressed_data(file, entry, buf.slice(prefix_len..)).await?;
+        let BufResult(res, scratch) =
+            find_entry_compressed_data(file, entry, buf.slice(prefix_len..)).await;
+        let mut offset = res?;
         buf = scratch.into_inner();
         tracing::debug!("found compressed data");
 

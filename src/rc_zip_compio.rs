@@ -10,7 +10,7 @@
 //!   * [rc-zip-tokio](https://crates.io/crates/rc-zip-tokio) for using tokio traits
 
 use compio::BufResult;
-use compio::buf::{IntoInner, IoBuf, IoBufMut};
+use compio::buf::{IntoInner, IoBuf, IoBufMut, buf_try};
 use compio::fs::File;
 use compio::io::AsyncReadAt;
 use rc_zip::parse::Method;
@@ -73,22 +73,24 @@ pub async fn find_entry_compressed_data<B: IoBuf + IoBufMut>(
     file: &File,
     entry: &Entry,
     buf: B,
-) -> Result<(u64, B), Error> {
+) -> BufResult<u64, B> {
     let mut buf = buf;
     let offset = entry.header_offset;
     // https://en.wikipedia.org/wiki/ZIP_(file_format)#Local_file_header
     let mut cursor = 0;
     while cursor < 30 {
-        let BufResult(res, slice) = file
-            .read_at(buf.slice(cursor..30), offset + (cursor as u64))
-            .await;
-        buf = slice.into_inner();
-        let n = res?;
+        let n;
+        (n, buf) = buf_try!(
+            file.read_at(buf.slice(cursor..30), offset + (cursor as u64))
+                .await
+                .into_inner()
+        );
         if n == 0 {
-            return Err(Error::IO(std::io::Error::new(
+            let eof = std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "file ends within local header",
-            )));
+            );
+            return BufResult(Err(eof), buf);
         }
         cursor += n;
     }
@@ -99,10 +101,10 @@ pub async fn find_entry_compressed_data<B: IoBuf + IoBufMut>(
     let extra_len = u16::from_le_bytes([header[28], header[29]]);
     tracing::debug!(name: "find_entry_compressed_data", ?name_len, ?extra_len);
 
-    Ok((
-        offset + 30 + u64::from(name_len) + u64::from(extra_len),
+    BufResult(
+        Ok(offset + 30 + u64::from(name_len) + u64::from(extra_len)),
         buf,
-    ))
+    )
 }
 
 #[cfg(test)]
