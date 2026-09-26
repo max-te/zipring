@@ -317,6 +317,41 @@ fn test_serve_deflated_entry_inflated_over_many_writes() {
     assert_entry_contents(&mut &body[..], &entry);
 }
 
+/// Stored bytes are the content itself, whatever codings the client would take.
+#[test]
+fn test_serve_stored_entry_verbatim_over_many_writes() {
+    let content: Vec<u8> = (0..=250).cycle().take(3 * SMALL_BUF).collect();
+    let path = std::env::temp_dir().join(format!("zipring-stored-{}.zip", std::process::id()));
+    std::fs::write(
+        &path,
+        crate::rc_zip_compio::test::stored_zip("data.bin", &[], &content),
+    )
+    .unwrap();
+
+    let mut writer = TestWriter::new();
+    run(async {
+        let file = compio::fs::File::open(&path).await.unwrap();
+        let archive = crate::rc_zip_compio::read_zip_from_file(&file)
+            .await
+            .unwrap();
+        let entry = fixture_entry(&archive, "data.bin");
+        ResponseStream::new(&mut writer, make_buf(SMALL_BUF))
+            .serve_target(&file, Target::Entry(&entry), accepting(GZIP_ACCEPTED))
+            .await
+            .unwrap();
+    });
+    std::fs::remove_file(&path).unwrap();
+    let (head, body) = split_response(&writer.written);
+
+    assert!(!head.contains("Content-Encoding"), "{head}");
+    assert!(
+        head.contains(&format!("Content-Length: {}", content.len())),
+        "{head}"
+    );
+    assert!(writer.writes > 1);
+    assert_eq!(body, content);
+}
+
 /// An entry with no content still owes its header, which is only ever written
 /// alongside the first body bytes.
 #[test]

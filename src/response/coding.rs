@@ -16,6 +16,8 @@ const GZIP_TRAILER_LEN: usize = 8;
 /// framed at most by a fixed prefix and a trailer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum NativeCoding {
+    /// Stored bytes, which are the content itself.
+    Identity,
     /// A raw deflate stream, which gzip framing turns into a gzip member.
     Gzip,
     Zstd,
@@ -24,6 +26,7 @@ pub(super) enum NativeCoding {
 impl NativeCoding {
     pub const fn of(method: Method) -> Option<Self> {
         match method {
+            Method::Store => Some(Self::Identity),
             Method::Deflate => Some(Self::Gzip),
             Method::Zstd => Some(Self::Zstd),
             _ => None,
@@ -32,30 +35,32 @@ impl NativeCoding {
 
     pub const fn is_accepted_by(self, accepted: AcceptedEncodings) -> bool {
         match self {
+            Self::Identity => true,
             Self::Gzip => accepted.gzip,
             Self::Zstd => accepted.zstd,
         }
     }
 
-    /// The `Content-Encoding` it is announced as.
-    pub const fn name(self) -> &'static str {
+    /// The `Content-Encoding` it is announced as, if any.
+    pub const fn name(self) -> Option<&'static str> {
         match self {
-            Self::Gzip => "gzip",
-            Self::Zstd => "zstd",
+            Self::Identity => None,
+            Self::Gzip => Some("gzip"),
+            Self::Zstd => Some("zstd"),
         }
     }
 
     pub const fn prefix(self) -> &'static [u8] {
         match self {
             Self::Gzip => &GZIP_HEADER,
-            Self::Zstd => &[],
+            Self::Identity | Self::Zstd => &[],
         }
     }
 
     pub const fn trailer_len(self) -> usize {
         match self {
             Self::Gzip => GZIP_TRAILER_LEN,
-            Self::Zstd => 0,
+            Self::Identity | Self::Zstd => 0,
         }
     }
 
@@ -68,7 +73,7 @@ impl NativeCoding {
                 // ISIZE is the uncompressed size modulo 2^32.
                 dst[4..].copy_from_slice(&entry.uncompressed_size.to_le_bytes()[..4]);
             }
-            Self::Zstd => {}
+            Self::Identity | Self::Zstd => {}
         }
     }
 
@@ -83,10 +88,13 @@ mod test {
 
     #[test]
     fn test_native_coding_of_each_method() {
+        assert_eq!(
+            NativeCoding::of(Method::Store),
+            Some(NativeCoding::Identity)
+        );
         assert_eq!(NativeCoding::of(Method::Deflate), Some(NativeCoding::Gzip));
         assert_eq!(NativeCoding::of(Method::Zstd), Some(NativeCoding::Zstd));
         for method in [
-            Method::Store,
             Method::Deflate64,
             Method::Bzip2,
             Method::Lzma,
@@ -104,5 +112,11 @@ mod test {
         };
         assert!(NativeCoding::Gzip.is_accepted_by(gzip));
         assert!(!NativeCoding::Zstd.is_accepted_by(gzip));
+    }
+
+    /// Identity needs no announcement, so no client can refuse it.
+    #[test]
+    fn test_identity_is_always_accepted() {
+        assert!(NativeCoding::Identity.is_accepted_by(AcceptedEncodings::default()));
     }
 }

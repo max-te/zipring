@@ -95,7 +95,7 @@ pub async fn find_entry_compressed_data<B: IoBuf + IoBufMut>(
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use super::*;
 
     /// The archive served by the integration tests; every entry is deflated.
@@ -203,7 +203,7 @@ mod test {
 
     /// Assemble a one-entry archive holding `content` uncompressed, with `extra`
     /// present in both the local and the central header.
-    fn stored_zip(name: &str, extra: &[u8], content: &[u8]) -> Vec<u8> {
+    pub(crate) fn stored_zip(name: &str, extra: &[u8], content: &[u8]) -> Vec<u8> {
         let mut crc = flate2::Crc::new();
         crc.update(content);
         let crc = crc.sum().to_le_bytes();

@@ -56,9 +56,9 @@ pub(super) fn write_entry_header(
     Write::write_all(&mut cur, mime_type.essence_str().as_bytes())?;
     Write::write_all(&mut cur, b"\r\n")?;
 
-    if let Some(native) = native {
+    if let Some(name) = native.and_then(NativeCoding::name) {
         Write::write_all(&mut cur, b"Content-Encoding: ")?;
-        Write::write_all(&mut cur, native.name().as_bytes())?;
+        Write::write_all(&mut cur, name.as_bytes())?;
         Write::write_all(&mut cur, b"\r\n")?;
     }
 
@@ -191,7 +191,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
 
     /// Sends `entry` in its native coding, which it must have.
     #[tracing::instrument(skip_all)]
-    async fn send_compressed_entry(
+    async fn send_native_entry(
         mut self,
         file: &File,
         entry: &Entry,
@@ -356,7 +356,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         let head_len;
         (head_len, self) = buf_try_traced!(res, self);
         if native.is_some() {
-            self.send_compressed_entry(file, entry, head_len).await
+            self.send_native_entry(file, entry, head_len).await
         } else {
             self.send_decompressed_entry(file, entry, head_len).await
         }
