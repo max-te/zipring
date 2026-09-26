@@ -5,7 +5,11 @@ use compio::buf::{IntoInner, IoBuf};
 use compio::fs::File;
 use compio::io::{AsyncReadAt, AsyncWriteExt};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
-use rc_zip::{Entry, fsm::EntryFsm, parse::Method as CompressionMethod};
+use rc_zip::{
+    Entry,
+    fsm::{EntryFsm, FsmResult},
+    parse::Method as CompressionMethod,
+};
 
 use crate::{
     Buf,
@@ -130,6 +134,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         self.buf
     }
 
+    #[tracing::instrument(skip_all, err(Debug))]
     async fn send_compressed_entry(
         mut self,
         file: &File,
@@ -191,6 +196,8 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         self.buf = buf;
         Ok(self)
     }
+
+    #[tracing::instrument(skip_all, err(Debug))]
     async fn send_decompressed_entry(
         mut self,
         file: &File,
@@ -204,33 +211,29 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         loop {
             if fsm.wants_read() {
                 let dst = fsm.space();
-                let max_read = dst.len().min(buf.len() - prefix_len);
-                let slice = buf.slice(prefix_len..prefix_len + max_read);
+                let available_space = dst.len().min(buf.len() - prefix_len);
+                let slice = buf.slice(prefix_len..prefix_len + available_space);
                 let BufResult(res, slice) = file.read_at(slice, offset).await;
-                let n = res?;
-                (dst[..n]).copy_from_slice(&slice[..n]);
-                fsm.fill(n);
-                offset += n as u64;
+                let bytes_read = res?;
+                dst[..bytes_read].copy_from_slice(&slice[..bytes_read]);
+                fsm.fill(bytes_read);
+                offset += bytes_read as u64;
                 buf = slice.into_inner();
             }
-            fsm = match fsm.process(&mut buf[prefix_len..]) {
-                Ok(rc_zip::fsm::FsmResult::Continue((fsm, outcome))) => {
-                    if outcome.bytes_written > 0 {
-                        let BufResult(res, slice) = self
-                            .stream
-                            .write_all(buf.slice(..prefix_len + outcome.bytes_written))
-                            .await;
-                        res?;
-                        buf = slice.into_inner();
-                        prefix_len = 0;
-                    }
-                    fsm
-                }
-                Ok(rc_zip::fsm::FsmResult::Done(_buffer)) => break,
-                Err(err) => {
-                    tracing::error!("ERR {:?}", err);
-                    return Err(std::io::Error::other(err));
-                }
+            let outcome;
+            (fsm, outcome) = match fsm.process(&mut buf[prefix_len..]) {
+                Ok(FsmResult::Continue(continued)) => continued,
+                Ok(FsmResult::Done(_buffer)) => break,
+                Err(err) => return Err(std::io::Error::other(err)),
+            };
+            if outcome.bytes_written > 0 {
+                let BufResult(res, slice) = self
+                    .stream
+                    .write_all(buf.slice(..prefix_len + outcome.bytes_written))
+                    .await;
+                res?;
+                buf = slice.into_inner();
+                prefix_len = 0;
             }
         }
         if prefix_len > 0 {
@@ -312,7 +315,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         Ok(self)
     }
 
-    #[tracing::instrument(skip_all, level = "debug")]
+    #[tracing::instrument(skip_all, level = "debug", err)]
     async fn serve_entry(
         mut self,
         file: &File,
