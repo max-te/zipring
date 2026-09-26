@@ -3,7 +3,7 @@ use std::io::{Cursor, Write};
 use std::ops::RangeBounds;
 
 use compio::BufResult;
-use compio::buf::{IntoInner, IoBuf, buf_try};
+use compio::buf::{IntoInner, IoBuf};
 use compio::fs::File;
 use compio::io::{AsyncReadAt, AsyncWriteExt};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
@@ -15,6 +15,7 @@ use rc_zip::{
 
 use crate::{
     Buf,
+    buf_result::{bail_traced, buf_try_traced},
     fstree::FsTreeNode,
     rc_zip_compio::{find_entry_compressed_data, is_method_supported},
     request::AcceptedEncodings,
@@ -185,7 +186,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
             find_entry_compressed_data(file, entry, self.buf.slice(prefix_len..)).await;
         self.buf = scratch.into_inner();
         let mut offset;
-        (offset, self) = buf_try!(res, self);
+        (offset, self) = buf_try_traced!(res, self);
         tracing::debug!("found compressed data");
 
         loop {
@@ -193,7 +194,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
             let room = self.buf.len() - prefix_len - GZIP_TRAILER_LEN;
             let bytes_to_read = len.min(room);
             let n;
-            (n, self) = buf_try!(
+            (n, self) = buf_try_traced!(
                 self.read_buf_at(file, prefix_len..prefix_len + bytes_to_read, offset)
                     .await
             );
@@ -202,7 +203,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
                     std::io::ErrorKind::UnexpectedEof,
                     "entry ends before its compressed size",
                 );
-                return BufResult(Err(eof), self);
+                bail_traced!(eof, self);
             }
             offset += n as u64;
             len -= n;
@@ -212,7 +213,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
                 self.buf[end..end + GZIP_TRAILER_LEN].copy_from_slice(&gzip_trailer);
                 end += GZIP_TRAILER_LEN;
             }
-            ((), self) = buf_try!(self.write_buf(..end).await);
+            ((), self) = buf_try_traced!(self.write_buf(..end).await);
 
             prefix_len = 0;
             if len == 0 {
@@ -237,7 +238,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
             if fsm.wants_read() {
                 let available_space = fsm.space().len().min(self.buf.len() - prefix_len);
                 let bytes_read;
-                (bytes_read, self) = buf_try!(
+                (bytes_read, self) = buf_try_traced!(
                     self.read_buf_at(file, prefix_len..prefix_len + available_space, offset)
                         .await
                 );
@@ -250,16 +251,17 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
             (fsm, outcome) = match fsm.process(&mut self.buf[prefix_len..]) {
                 Ok(FsmResult::Continue(continued)) => continued,
                 Ok(FsmResult::Done(_buffer)) => break,
-                Err(err) => return BufResult(Err(std::io::Error::other(err)), self),
+                Err(err) => bail_traced!(std::io::Error::other(err), self),
             };
             if outcome.bytes_written > 0 {
-                ((), self) = buf_try!(self.write_buf(..prefix_len + outcome.bytes_written).await);
+                ((), self) =
+                    buf_try_traced!(self.write_buf(..prefix_len + outcome.bytes_written).await);
                 prefix_len = 0;
             }
         }
         if prefix_len > 0 {
             // An entry without any content still owes its header.
-            ((), self) = buf_try!(self.write_buf(..prefix_len).await);
+            ((), self) = buf_try_traced!(self.write_buf(..prefix_len).await);
         }
         BufResult(Ok(()), self)
     }
@@ -293,7 +295,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
             &mut staged,
             format_args!("{INDEX_PREAMBLE}{top}"),
         );
-        ((), self) = buf_try!(res, self);
+        ((), self) = buf_try_traced!(res, self);
 
         let dirs = entries.iter().filter_map(|entry| match entry {
             FsTreeNode::Dir { name, .. } => Some((name, " class=dir", "/")),
@@ -317,15 +319,18 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
                 match res {
                     Ok(()) => break,
                     // Not even an empty chunk can hold this entry.
-                    Err(e) if staged == 0 => return BufResult(Err(e), self),
-                    Err(_) => ((), self) = buf_try!(self.flush_chunk(prefix, staged, false).await),
+                    Err(e) if staged == 0 => bail_traced!(e, self),
+                    Err(_) => {
+                        ((), self) = buf_try_traced!(self.flush_chunk(prefix, staged, false).await);
+                    }
                 }
                 prefix = 0;
                 staged = 0;
             }
         }
 
-        self.flush_chunk(prefix, staged, true).await
+        ((), self) = buf_try_traced!(self.flush_chunk(prefix, staged, true).await);
+        BufResult(Ok(()), self)
     }
 
     #[tracing::instrument(skip_all, level = "debug")]
@@ -354,7 +359,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
 
         let res = write_entry_header(&mut self.buf, entry, compression.as_ref());
         let head_len;
-        (head_len, self) = buf_try!(res, self);
+        (head_len, self) = buf_try_traced!(res, self);
         if compression.is_some() {
             self.send_compressed_entry(file, entry, head_len).await
         } else {
@@ -406,7 +411,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
             &mut len,
             format_args!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n"),
         );
-        ((), self) = buf_try!(res, self);
+        ((), self) = buf_try_traced!(res, self);
         self.write_buf(..len).await
     }
 
