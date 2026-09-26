@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
+use compio::BufResult;
 use compio::driver::ProactorBuilder;
 use compio::fs::File;
 use compio::io::AsyncWrite;
@@ -274,13 +275,13 @@ async fn serve(stream: TcpStream, file: File, tree: &FsTreeNode, buf_pool: BufPo
             }
         };
         let keep_alive = request.keep_alive();
-        buf = match respond(request, &file, tree, &mut stream_write).await {
-            Ok(buf) => buf,
-            Err(e) => {
-                tracing::error!("error responding: {:?}", e);
-                break;
-            }
-        };
+        let res;
+        BufResult(res, buf) = respond(request, &file, tree, &mut stream_write).await;
+        if let Err(e) = res {
+            tracing::error!("error responding: {:?}", e);
+            return_buf(&buf_pool, buf);
+            break;
+        }
         if let Err(e) = stream_write.flush().await {
             tracing::error!("error responding: {:?}", e);
             return_buf(&buf_pool, buf);

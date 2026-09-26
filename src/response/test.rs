@@ -137,8 +137,7 @@ fn test_serve_index_root() {
         ResponseStream::new(&mut writer, make_buf(4096))
             .serve_index(true, &entries)
             .await
-            .unwrap()
-            .into_buf();
+            .unwrap();
         let out = String::from_utf8_lossy(&writer.written);
         assert!(
             out.starts_with("HTTP/1.1 200 OK\r\nContent-Type: text/html;")
@@ -227,7 +226,8 @@ fn dummy_entry(
 
 /// Render an entry's response header into a buffer and read it back as text.
 fn header_of(entry: &Entry, compression: Option<&ContentCompression>) -> String {
-    let (buf, len) = write_entry_header(make_buf(2048), entry, compression).unwrap();
+    let mut buf = make_buf(2048);
+    let len = write_entry_header(&mut buf, entry, compression).unwrap();
     String::from_utf8(buf[..len].to_vec()).unwrap()
 }
 
@@ -354,8 +354,8 @@ fn test_serve_entry_reaching_past_the_archive_fails() {
         ResponseStream::new(&mut writer, make_buf(SMALL_BUF))
             .serve_node(&file, &node, GZIP_ACCEPTED)
             .await
-            .err()
-            .expect("should refuse to serve past the archive's end")
+            .0
+            .expect_err("should refuse to serve past the archive's end")
     });
     assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
 }

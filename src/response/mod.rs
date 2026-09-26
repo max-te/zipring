@@ -1,6 +1,7 @@
 use crate::fstree::FsTreeNode;
 use crate::request::Request;
 use crate::response::status::HttpStatus;
+use compio::BufResult;
 use compio::buf::IntoInner;
 use compio::fs::File;
 use compio::io::AsyncWriteExt;
@@ -20,7 +21,7 @@ pub async fn respond<W: AsyncWriteExt>(
     file: &File,
     tree: &FsTreeNode,
     stream: &mut W,
-) -> std::io::Result<Buf> {
+) -> BufResult<(), Buf> {
     let respond_span = tracing::info_span!("response", path = field::Empty).entered();
     match request {
         Request::Get { path, headers } => {
@@ -40,7 +41,7 @@ pub async fn respond<W: AsyncWriteExt>(
                     .serve_status(HttpStatus::NotFound)
                     .instrument(respond_span.exit())
                     .await
-                    .map(ResponseStream::into_buf);
+                    .map_buffer(ResponseStream::into_buf);
             };
             if let Some(crc32) = headers.if_none_match
                 && let Some(entry) = node.entry()
@@ -63,5 +64,5 @@ pub async fn respond<W: AsyncWriteExt>(
                 .await
         }
     }
-    .map(ResponseStream::into_buf)
+    .map_buffer(ResponseStream::into_buf)
 }
