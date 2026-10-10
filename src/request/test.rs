@@ -106,6 +106,24 @@ fn expect_request(result: BufResult<Option<Request>, Buf>) -> (Request, Buf) {
     (request, buf)
 }
 
+/// Parse `data` as one request that should arrive intact.
+async fn parse_request(data: Vec<u8>) -> (Request, Buf) {
+    let mut reader = TestReader::new(data);
+    expect_request(parse_one(&mut reader, make_buf(1024)).await)
+}
+
+/// Read two pipelined requests and check that `/first` arrives before `/second`.
+async fn assert_reads_first_then_second(reader: &mut RequestReader, stream: &mut impl AsyncRead) {
+    for expected in [b"/first".as_slice(), b"/second".as_slice()] {
+        let (result, buf) = expect_request(reader.next_request(stream, make_buf(1024)).await);
+        assert_matches!(
+            result,
+            Request::Get { path_len, .. } if &buf[..path_len] == expected,
+            "expected {:?}", str::from_utf8(expected).unwrap()
+        );
+    }
+}
+
 fn run(future: impl Future) {
     compio::runtime::Runtime::new().unwrap().block_on(future);
 }
@@ -114,8 +132,7 @@ fn run(future: impl Future) {
 fn test_parse_simple_get() {
     run(async {
         let data = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n".to_vec();
-        let mut reader = TestReader::new(data);
-        let (result, buf) = expect_request(parse_one(&mut reader, make_buf(1024)).await);
+        let (result, buf) = parse_request(data).await;
         assert_matches!(
             result,
             Request::Get {
@@ -137,8 +154,7 @@ fn test_parse_simple_get() {
 fn test_parse_get_with_etag() {
     run(async {
         let data = b"GET /style.css HTTP/1.1\r\nIf-None-Match: \"deadbeef\"\r\n\r\n".to_vec();
-        let mut reader = TestReader::new(data);
-        let (result, _) = expect_request(parse_one(&mut reader, make_buf(1024)).await);
+        let (result, _) = parse_request(data).await;
         assert_matches!(
             result,
             Request::Get {
@@ -157,8 +173,7 @@ fn test_parse_get_with_invalid_etag() {
     run(async {
         // Value is 10 bytes but hex part is not valid hex
         let data = b"GET / HTTP/1.1\r\nIf-None-Match: \"zzzzzzzz\"\r\n\r\n".to_vec();
-        let mut reader = TestReader::new(data);
-        let (result, _) = expect_request(parse_one(&mut reader, make_buf(1024)).await);
+        let (result, _) = parse_request(data).await;
         assert_matches!(
             result,
             Request::Get {
@@ -176,8 +191,7 @@ fn test_parse_get_with_invalid_etag() {
 fn test_parse_get_with_accept_encoding() {
     run(async {
         let data = b"GET / HTTP/1.1\r\nAccept-Encoding: gzip, zstd\r\n\r\n".to_vec();
-        let mut reader = TestReader::new(data);
-        let (result, _) = expect_request(parse_one(&mut reader, make_buf(1024)).await);
+        let (result, _) = parse_request(data).await;
         assert_matches!(
             result,
             Request::Get {
@@ -198,8 +212,7 @@ fn test_parse_get_with_accept_encoding() {
 fn test_parse_get_with_connection_close() {
     run(async {
         let data = b"GET / HTTP/1.1\r\nConnection: close\r\n\r\n".to_vec();
-        let mut reader = TestReader::new(data);
-        let (result, _) = expect_request(parse_one(&mut reader, make_buf(1024)).await);
+        let (result, _) = parse_request(data).await;
         assert_matches!(
             result,
             Request::Get {
@@ -214,8 +227,7 @@ fn test_parse_get_with_connection_close() {
 fn test_parse_get_with_connection_keep_alive() {
     run(async {
         let data = b"GET / HTTP/1.1\r\nConnection: keep-alive\r\n\r\n".to_vec();
-        let mut reader = TestReader::new(data);
-        let (result, _) = expect_request(parse_one(&mut reader, make_buf(1024)).await);
+        let (result, _) = parse_request(data).await;
         assert!(result.keep_alive());
         assert_matches!(
             result,
@@ -231,8 +243,7 @@ fn test_parse_get_with_connection_keep_alive() {
 fn test_parse_post_not_allowed() {
     run(async {
         let data = b"POST / HTTP/1.1\r\nContent-Length: 0\r\n\r\n".to_vec();
-        let mut reader = TestReader::new(data);
-        let (result, _) = expect_request(parse_one(&mut reader, make_buf(1024)).await);
+        let (result, _) = parse_request(data).await;
         assert_matches!(
             result,
             Request::Bad {
@@ -301,8 +312,7 @@ fn test_parse_request_too_large_for_buffer() {
         // Few enough headers that the 64-header limit is not what rejects it.
         let mut data = b"GET / HTTP/1.1\r\nX-Padding: ".to_vec();
         data.resize(REQUEST_BUF_SIZE * 2, b'a');
-        let mut reader = TestReader::new(data);
-        let (result, _) = expect_request(parse_one(&mut reader, make_buf(1024)).await);
+        let (result, _) = parse_request(data).await;
         assert_matches!(
             result,
             Request::Bad {
@@ -357,16 +367,7 @@ fn test_parse_pipelined_requests() {
             .to_vec();
         let mut stream = TestReader::new(data);
         let mut reader = RequestReader::new();
-
-        for expected in [b"/first".as_slice(), b"/second".as_slice()] {
-            let (result, buf) =
-                expect_request(reader.next_request(&mut stream, make_buf(1024)).await);
-            assert_matches!(
-                result,
-                Request::Get { path_len, .. } if &buf[..path_len] == expected,
-                "expected {:?}", str::from_utf8(expected).unwrap()
-            );
-        }
+        assert_reads_first_then_second(&mut reader, &mut stream).await;
     });
 }
 
@@ -385,16 +386,7 @@ fn test_parse_pipelined_requests_needing_compaction() {
             second[split..].to_vec(),
         ]);
         let mut reader = RequestReader::with_capacity(capacity);
-
-        for expected in [b"/first".as_slice(), b"/second".as_slice()] {
-            let (result, buf) =
-                expect_request(reader.next_request(&mut stream, make_buf(1024)).await);
-            assert_matches!(
-                result,
-                Request::Get { path_len, .. } if &buf[..path_len] == expected,
-                "expected {:?}", str::from_utf8(expected).unwrap()
-            );
-        }
+        assert_reads_first_then_second(&mut reader, &mut stream).await;
     });
 }
 
@@ -408,16 +400,7 @@ fn test_parse_pipelined_requests_split_mid_second() {
             b"ond HTTP/1.1\r\n\r\n".to_vec(),
         ]);
         let mut reader = RequestReader::new();
-
-        for expected in [b"/first".as_slice(), b"/second".as_slice()] {
-            let (result, buf) =
-                expect_request(reader.next_request(&mut stream, make_buf(1024)).await);
-            assert_matches!(
-                result,
-                Request::Get { path_len, .. } if &buf[..path_len] == expected,
-                "expected {:?}", str::from_utf8(expected).unwrap()
-            );
-        }
+        assert_reads_first_then_second(&mut reader, &mut stream).await;
     });
 }
 
@@ -447,8 +430,7 @@ fn accepted(lines: &str) -> AcceptedEncodings {
     let mut accepted = None;
     run(async {
         let data = format!("GET / HTTP/1.1\r\n{lines}\r\n").into_bytes();
-        let mut reader = TestReader::new(data);
-        let (result, _) = expect_request(parse_one(&mut reader, make_buf(1024)).await);
+        let (result, _) = parse_request(data).await;
         let Request::Get { headers, .. } = result else {
             panic!("{lines:?} should parse");
         };
