@@ -271,7 +271,6 @@ async fn serve(stream: TcpStream, file: File, tree: &FsTreeNode, buf_pool: BufPo
         let request;
         BufResult(request, buf) = reader.next_request(&mut stream_read, buf).await;
         let Ok(Some(request)) = request else {
-            return_buf(&buf_pool, buf);
             break;
         };
         let keep_alive = request.keep_alive();
@@ -279,20 +278,18 @@ async fn serve(stream: TcpStream, file: File, tree: &FsTreeNode, buf_pool: BufPo
         BufResult(res, buf) = respond(request, buf, &file, tree, &mut stream_write).await;
         if let Err(e) = res {
             tracing::error!("error responding: {:?}", e);
-            return_buf(&buf_pool, buf);
             break;
         }
         if let Err(e) = stream_write.flush().await {
             tracing::error!("error responding: {:?}", e);
-            return_buf(&buf_pool, buf);
             break;
         }
         if !keep_alive {
             tracing::info!("closing connection on request");
-            return_buf(&buf_pool, buf);
             break;
         }
     }
+    return_buf(&buf_pool, buf);
     if let Err(e) = stream_write.shutdown().await {
         tracing::error!("shutdown failed: {:?}", e);
     }
