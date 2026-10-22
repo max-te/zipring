@@ -354,6 +354,44 @@ fn test_serve_stored_entry_verbatim_over_many_writes() {
     assert_eq!(body, content);
 }
 
+/// The output spans several decoder windows, and the input several refills.
+#[test]
+fn test_serve_long_deflated_entry_inflated() {
+    let content: Vec<u8> = (0..80_000u32)
+        .flat_map(|i| format!("{} ", i.wrapping_mul(2_654_435_761) % 1000).into_bytes())
+        .collect();
+    let path = std::env::temp_dir().join(format!("zipring-deflated-{}.zip", std::process::id()));
+    let zip = crate::rc_zip_compio::test::deflated_zip("long.txt", &content);
+    assert!(zip.len() > 32 * 1024, "the stream should need many reads");
+    assert!(
+        content.len() > 4 * 64 * 1024,
+        "the output should need many windows"
+    );
+    std::fs::write(&path, zip).unwrap();
+
+    let mut writer = TestWriter::new();
+    run(async {
+        let file = compio::fs::File::open(&path).await.unwrap();
+        let archive = crate::rc_zip_compio::read_zip_from_file(&file)
+            .await
+            .unwrap();
+        let entry = fixture_entry(&archive, "long.txt");
+        ResponseStream::new(&mut writer, make_buf(SMALL_BUF))
+            .serve_target(&file, Target::Entry(&entry), accepting(NOTHING_ACCEPTED))
+            .await
+            .unwrap();
+    });
+    std::fs::remove_file(&path).unwrap();
+    let (head, body) = split_response(&writer.written);
+
+    assert!(!head.contains("Content-Encoding"), "{head}");
+    assert!(
+        head.contains(&format!("Content-Length: {}", content.len())),
+        "{head}"
+    );
+    assert!(body == content, "inflated body differs from the content");
+}
+
 /// An entry with no content still owes its header, which is only ever written
 /// alongside the first body bytes.
 #[test]
@@ -579,6 +617,44 @@ fn test_entry_body_reaching_past_the_archive_fails() {
             .expect_err("should refuse to read past the archive's end")
     });
     assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+}
+
+#[test]
+fn test_entry_body_inflated_against_the_wrong_crc_fails() {
+    let err = with_fixture_entry("index.html", async |file, mut entry| {
+        entry.crc32 ^= 1;
+        let mut body = EntryBody::new(&entry, None);
+        drain(&mut body, file, SMALL_BUF)
+            .await
+            .expect_err("should refuse data that fails its checksum")
+    });
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+}
+
+/// Bytes past the recorded size would overrun the announced Content-Length,
+/// so none of them may leave.
+#[test]
+fn test_entry_body_inflating_past_the_recorded_size_fails() {
+    const RECORDED: u64 = 1000;
+    let (portions, err) = with_fixture_entry("index.html", async |file, mut entry| {
+        entry.uncompressed_size = RECORDED;
+        let mut body = EntryBody::new(&entry, None);
+        let mut buf = make_buf(SMALL_BUF);
+        let mut portions = Vec::new();
+        loop {
+            let BufResult(res, returned) = body.fill(file, buf, 0).await;
+            buf = returned;
+            match res {
+                Ok(n) => portions.push(n),
+                Err(err) => return (portions, err),
+            }
+        }
+    });
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    assert!(
+        portions.iter().sum::<usize>() as u64 <= RECORDED,
+        "{portions:?}"
+    );
 }
 
 #[test]

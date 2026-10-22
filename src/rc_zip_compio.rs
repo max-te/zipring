@@ -204,32 +204,55 @@ pub(crate) mod test {
     /// Assemble a one-entry archive holding `content` uncompressed, with `extra`
     /// present in both the local and the central header.
     pub(crate) fn stored_zip(name: &str, extra: &[u8], content: &[u8]) -> Vec<u8> {
+        one_entry_zip(name, extra, 0, content, content)
+    }
+
+    /// Assemble a one-entry archive holding `content` as a raw deflate stream.
+    pub(crate) fn deflated_zip(name: &str, content: &[u8]) -> Vec<u8> {
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, content).unwrap();
+        one_entry_zip(name, &[], 8, &encoder.finish().unwrap(), content)
+    }
+
+    /// Assemble a one-entry archive whose `data` decodes by `method` to `content`.
+    fn one_entry_zip(
+        name: &str,
+        extra: &[u8],
+        method: u16,
+        data: &[u8],
+        content: &[u8],
+    ) -> Vec<u8> {
         let mut crc = flate2::Crc::new();
         crc.update(content);
         let crc = crc.sum().to_le_bytes();
+        let compressed_size = u32::try_from(data.len()).unwrap().to_le_bytes();
         let size = u32::try_from(content.len()).unwrap().to_le_bytes();
+        let method = method.to_le_bytes();
         let name_len = u16::try_from(name.len()).unwrap().to_le_bytes();
         let extra_len = u16::try_from(extra.len()).unwrap().to_le_bytes();
 
         let mut zip = Vec::new();
         zip.extend(b"PK\x03\x04"); // local file header
-        zip.extend([20, 0, 0, 0, 0, 0]); // version needed, flags, method Store
+        zip.extend([20, 0, 0, 0]); // version needed, flags
+        zip.extend(method);
         zip.extend([0; 4]); // modification time and date
         zip.extend(crc);
-        zip.extend(size); // compressed
+        zip.extend(compressed_size);
         zip.extend(size); // uncompressed
         zip.extend(name_len);
         zip.extend(extra_len);
         zip.extend(name.as_bytes());
         zip.extend(extra);
-        zip.extend(content);
+        zip.extend(data);
 
         let central_offset = u32::try_from(zip.len()).unwrap();
         zip.extend(b"PK\x01\x02"); // central directory header
-        zip.extend([20, 0, 20, 0, 0, 0, 0, 0]); // versions, flags, method Store
+        zip.extend([20, 0, 20, 0, 0, 0]); // versions, flags
+        zip.extend(method);
         zip.extend([0; 4]); // modification time and date
         zip.extend(crc);
-        zip.extend(size);
+        zip.extend(compressed_size);
         zip.extend(size);
         zip.extend(name_len);
         zip.extend(extra_len);
