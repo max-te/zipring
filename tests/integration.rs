@@ -211,7 +211,7 @@ fn test_request_split_across_segments() {
         .expect("first segment failed");
     std::thread::sleep(Duration::from_millis(50));
     stream
-        .write_all(b"host\r\nConnection: close\r\n\r\n")
+        .write_all(b"host\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n")
         .expect("second segment failed");
 
     let mut response = String::new();
@@ -236,8 +236,9 @@ fn test_pipelined_requests() {
     // the second from bytes it buffered while answering the first.
     stream
         .write_all(
-            b"GET /metadata.opf HTTP/1.1\r\nHost: localhost\r\n\r\n\
-              GET /style.css HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            b"GET /metadata.opf HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip\r\n\r\n\
+              GET /style.css HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip\r\n\
+              Connection: close\r\n\r\n",
         )
         .expect("write failed");
 
@@ -527,6 +528,7 @@ fn test_content_encoding_gzip() {
     assert!(s.ends_with("</html>"));
 }
 
+#[cfg(feature = "deflate")]
 #[test]
 fn test_content_encoding_decompressed() {
     let zip_path = PathBuf::from(TEST_FILE);
@@ -544,6 +546,17 @@ fn test_content_encoding_decompressed() {
         let body = String::from_utf8(body).expect("should be valid utf8");
         assert!(body.ends_with("</html>"));
     }
+}
+
+/// Without a decoder, a deflated entry reaches only clients that take gzip.
+#[cfg(not(feature = "deflate"))]
+#[test]
+fn test_deflated_entry_is_refused_undecoded() {
+    let server = start_server(TEST_FILE);
+
+    let (headers, body) = make_request(&server, "/index.html", "brotli").expect("Request failed");
+    assert!(headers.contains("500 Unsupported Compression"), "{headers}");
+    assert!(body.is_empty());
 }
 
 #[test]

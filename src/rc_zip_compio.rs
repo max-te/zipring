@@ -208,6 +208,7 @@ pub(crate) mod test {
     }
 
     /// Assemble a one-entry archive holding `content` as a raw deflate stream.
+    #[cfg(feature = "deflate")]
     pub(crate) fn deflated_zip(name: &str, content: &[u8]) -> Vec<u8> {
         let mut encoder =
             flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());

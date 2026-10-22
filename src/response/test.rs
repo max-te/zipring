@@ -295,6 +295,7 @@ fn test_serve_deflated_entry_as_gzip_over_many_writes() {
     assert_entry_contents(&mut flate2::read::GzDecoder::new(&body[..]), &entry);
 }
 
+#[cfg(feature = "deflate")]
 #[test]
 fn test_serve_deflated_entry_inflated_over_many_writes() {
     let mut writer = TestWriter::new();
@@ -360,6 +361,7 @@ fn test_serve_stored_entry_verbatim_over_many_writes() {
 }
 
 /// The output spans several decoder windows, and the input several refills.
+#[cfg(feature = "deflate")]
 #[test]
 fn test_serve_long_deflated_entry_inflated() {
     let content: Vec<u8> = (0..80_000u32)
@@ -534,6 +536,7 @@ fn test_entry_body_gzip_in_small_portions() {
     assert_entry_contents(&mut flate2::read::GzDecoder::new(&bytes[..]), &entry);
 }
 
+#[cfg(feature = "deflate")]
 #[test]
 fn test_entry_body_decoded_in_small_portions() {
     let (entry, portions, bytes) = with_fixture_entry("index.html", async |file, entry| {
@@ -596,6 +599,7 @@ fn test_entry_body_fills_behind_what_is_staged() {
     assert_eq!(buf[STAGED..STAGED + 2], [0x1f, 0x8b], "gzip magic");
 }
 
+#[cfg(feature = "deflate")]
 #[test]
 fn test_entry_body_of_an_empty_entry_is_empty_when_decoded() {
     let portions = with_fixture_entry("images/", async |file, entry| {
@@ -638,6 +642,7 @@ fn test_entry_body_reaching_past_the_archive_fails() {
     assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
 }
 
+#[cfg(feature = "deflate")]
 #[test]
 fn test_entry_body_inflated_against_the_wrong_crc_fails() {
     let err = with_fixture_entry("index.html", async |file, mut entry| {
@@ -653,6 +658,7 @@ fn test_entry_body_inflated_against_the_wrong_crc_fails() {
 
 /// Bytes past the recorded size would overrun the announced Content-Length,
 /// so none of them may leave.
+#[cfg(feature = "deflate")]
 #[test]
 fn test_entry_body_inflating_past_the_recorded_size_fails() {
     const RECORDED: u64 = 1000;
@@ -679,6 +685,7 @@ fn test_entry_body_inflating_past_the_recorded_size_fails() {
 }
 
 /// A body dropped halfway leaves its inflater fit for the next body.
+#[cfg(feature = "deflate")]
 #[test]
 fn test_entry_body_inflates_after_one_was_dropped_early() {
     let (entry, bytes) = with_fixture_entry("index.html", async |file, entry| {
