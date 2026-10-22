@@ -15,7 +15,11 @@ use crate::{
     fstree::{FsTreeNode, Target},
     rc_zip_compio::is_method_supported,
     request::{AcceptedEncodings, Headers},
-    response::{body::EntryBody, coding::NativeCoding, status::HttpStatus},
+    response::{
+        body::{EntryBody, InflaterPool},
+        coding::NativeCoding,
+        status::HttpStatus,
+    },
 };
 
 const HTTP_CHUNK_DIGIT_COUNT: usize = size_of::<usize>() * 2;
@@ -240,6 +244,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         file: &File,
         entry: &Entry,
         accepted_encodings: AcceptedEncodings,
+        inflaters: &InflaterPool,
     ) -> BufResult<(), Self> {
         let native = NativeCoding::of(entry.method)
             .filter(|native| native.is_accepted_by(accepted_encodings));
@@ -252,7 +257,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         let res = write_entry_header(&mut self.buf, entry, native);
         let head_len;
         (head_len, self) = buf_try_traced!(res, self);
-        self.send_body(file, EntryBody::new(entry, native), head_len)
+        self.send_body(file, EntryBody::new(entry, native, inflaters), head_len)
             .await
     }
 
@@ -287,6 +292,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
         file: &File,
         target: Target<'_>,
         headers: Headers,
+        inflaters: &InflaterPool,
     ) -> BufResult<(), Self> {
         match target {
             Target::Entry(entry) if headers.if_none_match == Some(entry.crc32) => {
@@ -294,7 +300,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
                 self.serve_not_modified(entry.crc32).await
             }
             Target::Entry(entry) => {
-                self.serve_entry(file, entry, headers.accepted_encodings)
+                self.serve_entry(file, entry, headers.accepted_encodings, inflaters)
                     .await
             }
             Target::Listing { is_root, children } => self.serve_index(is_root, children).await,

@@ -11,6 +11,7 @@ use crate::Buf;
 use stream::ResponseStream;
 
 mod body;
+pub use body::InflaterPool;
 mod coding;
 pub mod status;
 mod stream;
@@ -22,6 +23,7 @@ pub async fn respond<W: AsyncWriteExt>(
     buf: Buf,
     file: &File,
     tree: &FsTreeNode,
+    inflaters: &InflaterPool,
     stream: &mut W,
 ) -> BufResult<(), Buf> {
     let respond_span = tracing::info_span!("response", path = field::Empty).entered();
@@ -45,7 +47,7 @@ pub async fn respond<W: AsyncWriteExt>(
                         .await
                 }
                 Some(target) => {
-                    s.serve_target(file, target, headers)
+                    s.serve_target(file, target, headers, inflaters)
                         .instrument(respond_span.exit())
                         .await
                 }

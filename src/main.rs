@@ -22,7 +22,7 @@ use tracing::Instrument;
 
 use crate::fstree::FsTreeNode;
 use crate::request::RequestReader;
-use crate::response::respond;
+use crate::response::{InflaterPool, respond};
 
 type Buf = Box<[u8]>;
 
@@ -210,6 +210,7 @@ async fn inner_main(
     tree: &'static FsTreeNode,
 ) -> Result<Never> {
     let buf_pool: BufPool = Rc::new(RefCell::new(Vec::new()));
+    let inflaters = InflaterPool::default();
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let socket = TcpSocket::new_v4()
         .await
@@ -250,7 +251,14 @@ async fn inner_main(
                 tracing::info!("accepted a connection from {}", addr);
                 let _ = stream.set_nodelay(true);
                 let handle = compio::runtime::spawn(
-                    serve(stream, file.clone(), tree, buf_pool.clone()).instrument(span.exit()),
+                    serve(
+                        stream,
+                        file.clone(),
+                        tree,
+                        buf_pool.clone(),
+                        inflaters.clone(),
+                    )
+                    .instrument(span.exit()),
                 );
                 handle.detach();
             }
@@ -262,7 +270,13 @@ async fn inner_main(
     }
 }
 
-async fn serve(stream: TcpStream, file: File, tree: &FsTreeNode, buf_pool: BufPool) {
+async fn serve(
+    stream: TcpStream,
+    file: File,
+    tree: &FsTreeNode,
+    buf_pool: BufPool,
+    inflaters: InflaterPool,
+) {
     let (mut stream_read, mut stream_write) = stream.split();
 
     let mut reader = RequestReader::new();
@@ -275,7 +289,8 @@ async fn serve(stream: TcpStream, file: File, tree: &FsTreeNode, buf_pool: BufPo
         };
         let keep_alive = request.keep_alive();
         let res;
-        BufResult(res, buf) = respond(request, buf, &file, tree, &mut stream_write).await;
+        BufResult(res, buf) =
+            respond(request, buf, &file, tree, &inflaters, &mut stream_write).await;
         if let Err(e) = res {
             tracing::error!("error responding: {:?}", e);
             break;

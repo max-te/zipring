@@ -4,7 +4,7 @@ use compio::fs::File;
 use compio::io::AsyncWrite;
 use rc_zip::parse::{Entry, Method as ZipMethod, Mode, Version};
 
-use super::body::EntryBody;
+use super::body::{EntryBody, InflaterPool};
 use super::coding::NativeCoding;
 use super::stream::*;
 use crate::Buf;
@@ -338,7 +338,12 @@ fn test_serve_stored_entry_verbatim_over_many_writes() {
             .unwrap();
         let entry = fixture_entry(&archive, "data.bin");
         ResponseStream::new(&mut writer, make_buf(SMALL_BUF))
-            .serve_target(&file, Target::Entry(&entry), accepting(GZIP_ACCEPTED))
+            .serve_target(
+                &file,
+                Target::Entry(&entry),
+                accepting(GZIP_ACCEPTED),
+                &InflaterPool::default(),
+            )
             .await
             .unwrap();
     });
@@ -377,7 +382,12 @@ fn test_serve_long_deflated_entry_inflated() {
             .unwrap();
         let entry = fixture_entry(&archive, "long.txt");
         ResponseStream::new(&mut writer, make_buf(SMALL_BUF))
-            .serve_target(&file, Target::Entry(&entry), accepting(NOTHING_ACCEPTED))
+            .serve_target(
+                &file,
+                Target::Entry(&entry),
+                accepting(NOTHING_ACCEPTED),
+                &InflaterPool::default(),
+            )
             .await
             .unwrap();
     });
@@ -456,6 +466,7 @@ fn test_serve_target_redirects_into_the_dir() {
                 &file,
                 Target::Redirect { name: "a <b>" },
                 Headers::default(),
+                &InflaterPool::default(),
             )
             .await
             .unwrap();
@@ -476,7 +487,7 @@ fn test_serve_target_redirects_into_the_dir() {
 /// Drains `body` through a buffer of `buflen` bytes, returning the size of each
 /// portion and the bytes of all of them.
 async fn drain(
-    body: &mut EntryBody<'_>,
+    mut body: EntryBody<'_>,
     file: &File,
     buflen: usize,
 ) -> std::io::Result<(Vec<usize>, Vec<u8>)> {
@@ -509,8 +520,9 @@ fn with_fixture_entry<T>(name: &str, test: impl AsyncFnOnce(&File, Entry) -> T) 
 #[test]
 fn test_entry_body_gzip_in_small_portions() {
     let (entry, portions, bytes) = with_fixture_entry("index.html", async |file, entry| {
-        let mut body = EntryBody::new(&entry, Some(NativeCoding::Gzip));
-        let (portions, bytes) = drain(&mut body, file, SMALL_BUF).await.unwrap();
+        let inflaters = InflaterPool::default();
+        let body = EntryBody::new(&entry, Some(NativeCoding::Gzip), &inflaters);
+        let (portions, bytes) = drain(body, file, SMALL_BUF).await.unwrap();
         (entry, portions, bytes)
     });
     assert!(portions.len() > 1, "{portions:?}");
@@ -525,8 +537,9 @@ fn test_entry_body_gzip_in_small_portions() {
 #[test]
 fn test_entry_body_decoded_in_small_portions() {
     let (entry, portions, bytes) = with_fixture_entry("index.html", async |file, entry| {
-        let mut body = EntryBody::new(&entry, None);
-        let (portions, bytes) = drain(&mut body, file, SMALL_BUF).await.unwrap();
+        let inflaters = InflaterPool::default();
+        let body = EntryBody::new(&entry, None, &inflaters);
+        let (portions, bytes) = drain(body, file, SMALL_BUF).await.unwrap();
         (entry, portions, bytes)
     });
     assert!(portions.len() > 1, "{portions:?}");
@@ -538,8 +551,9 @@ fn test_entry_body_decoded_in_small_portions() {
 fn test_entry_body_trailer_rides_with_the_last_data() {
     let (entry, portions) = with_fixture_entry("index.html", async |file, entry| {
         let whole = usize::try_from(NativeCoding::Gzip.content_length(&entry)).unwrap();
-        let mut body = EntryBody::new(&entry, Some(NativeCoding::Gzip));
-        let (portions, _) = drain(&mut body, file, whole).await.unwrap();
+        let inflaters = InflaterPool::default();
+        let body = EntryBody::new(&entry, Some(NativeCoding::Gzip), &inflaters);
+        let (portions, _) = drain(body, file, whole).await.unwrap();
         (entry, portions)
     });
     assert_eq!(
@@ -554,8 +568,9 @@ fn test_entry_body_trailer_rides_with_the_last_data() {
 fn test_entry_body_trailer_spills_when_the_data_fills_the_buffer() {
     let (entry, portions, bytes) = with_fixture_entry("index.html", async |file, entry| {
         let whole = usize::try_from(NativeCoding::Gzip.content_length(&entry)).unwrap();
-        let mut body = EntryBody::new(&entry, Some(NativeCoding::Gzip));
-        let (portions, bytes) = drain(&mut body, file, whole - 4).await.unwrap();
+        let inflaters = InflaterPool::default();
+        let body = EntryBody::new(&entry, Some(NativeCoding::Gzip), &inflaters);
+        let (portions, bytes) = drain(body, file, whole - 4).await.unwrap();
         (entry, portions, bytes)
     });
     let trailer_len = NativeCoding::Gzip.trailer_len();
@@ -571,7 +586,8 @@ fn test_entry_body_fills_behind_what_is_staged() {
     let buf = with_fixture_entry("index.html", async |file, entry| {
         let mut buf = make_buf(SMALL_BUF);
         buf[..STAGED].fill(b'H');
-        let mut body = EntryBody::new(&entry, Some(NativeCoding::Gzip));
+        let inflaters = InflaterPool::default();
+        let mut body = EntryBody::new(&entry, Some(NativeCoding::Gzip), &inflaters);
         let BufResult(res, buf) = body.fill(file, buf, STAGED).await;
         assert_eq!(res.unwrap(), SMALL_BUF - STAGED);
         buf
@@ -583,8 +599,9 @@ fn test_entry_body_fills_behind_what_is_staged() {
 #[test]
 fn test_entry_body_of_an_empty_entry_is_empty_when_decoded() {
     let portions = with_fixture_entry("images/", async |file, entry| {
-        let mut body = EntryBody::new(&entry, None);
-        drain(&mut body, file, SMALL_BUF).await.unwrap().0
+        let inflaters = InflaterPool::default();
+        let body = EntryBody::new(&entry, None, &inflaters);
+        drain(body, file, SMALL_BUF).await.unwrap().0
     });
     assert!(portions.is_empty(), "{portions:?}");
 }
@@ -594,8 +611,9 @@ fn test_entry_body_of_an_empty_entry_is_empty_when_decoded() {
 #[test]
 fn test_entry_body_of_an_empty_entry_is_its_framing_when_native() {
     let (entry, bytes) = with_fixture_entry("images/", async |file, entry| {
-        let mut body = EntryBody::new(&entry, Some(NativeCoding::Gzip));
-        let (_, bytes) = drain(&mut body, file, SMALL_BUF).await.unwrap();
+        let inflaters = InflaterPool::default();
+        let body = EntryBody::new(&entry, Some(NativeCoding::Gzip), &inflaters);
+        let (_, bytes) = drain(body, file, SMALL_BUF).await.unwrap();
         (entry, bytes)
     });
     assert_eq!(
@@ -611,8 +629,9 @@ fn test_entry_body_of_an_empty_entry_is_its_framing_when_native() {
 fn test_entry_body_reaching_past_the_archive_fails() {
     let err = with_fixture_entry("index.html", async |file, mut entry| {
         entry.compressed_size = 1 << 20;
-        let mut body = EntryBody::new(&entry, Some(NativeCoding::Gzip));
-        drain(&mut body, file, SMALL_BUF)
+        let inflaters = InflaterPool::default();
+        let body = EntryBody::new(&entry, Some(NativeCoding::Gzip), &inflaters);
+        drain(body, file, SMALL_BUF)
             .await
             .expect_err("should refuse to read past the archive's end")
     });
@@ -623,8 +642,9 @@ fn test_entry_body_reaching_past_the_archive_fails() {
 fn test_entry_body_inflated_against_the_wrong_crc_fails() {
     let err = with_fixture_entry("index.html", async |file, mut entry| {
         entry.crc32 ^= 1;
-        let mut body = EntryBody::new(&entry, None);
-        drain(&mut body, file, SMALL_BUF)
+        let inflaters = InflaterPool::default();
+        let body = EntryBody::new(&entry, None, &inflaters);
+        drain(body, file, SMALL_BUF)
             .await
             .expect_err("should refuse data that fails its checksum")
     });
@@ -638,7 +658,8 @@ fn test_entry_body_inflating_past_the_recorded_size_fails() {
     const RECORDED: u64 = 1000;
     let (portions, err) = with_fixture_entry("index.html", async |file, mut entry| {
         entry.uncompressed_size = RECORDED;
-        let mut body = EntryBody::new(&entry, None);
+        let inflaters = InflaterPool::default();
+        let mut body = EntryBody::new(&entry, None, &inflaters);
         let mut buf = make_buf(SMALL_BUF);
         let mut portions = Vec::new();
         loop {
@@ -655,6 +676,27 @@ fn test_entry_body_inflating_past_the_recorded_size_fails() {
         portions.iter().sum::<usize>() as u64 <= RECORDED,
         "{portions:?}"
     );
+}
+
+/// A body dropped halfway leaves its inflater fit for the next body.
+#[test]
+fn test_entry_body_inflates_after_one_was_dropped_early() {
+    let (entry, bytes) = with_fixture_entry("index.html", async |file, entry| {
+        let inflaters = InflaterPool::default();
+        let mut abandoned = EntryBody::new(&entry, None, &inflaters);
+        let BufResult(res, _) = abandoned.fill(file, make_buf(SMALL_BUF), 0).await;
+        assert_eq!(
+            res.unwrap(),
+            SMALL_BUF,
+            "the entry should be partly decoded"
+        );
+        drop(abandoned);
+
+        let body = EntryBody::new(&entry, None, &inflaters);
+        let (_, bytes) = drain(body, file, SMALL_BUF).await.unwrap();
+        (entry, bytes)
+    });
+    assert_entry_contents(&mut &bytes[..], &entry);
 }
 
 #[test]
@@ -695,7 +737,12 @@ fn test_zstd_entry_is_not_announced_when_unaccepted() {
         // However this ends -- 500 without a zstd decoder, a decode attempt with one --
         // the client must not be told the body is zstd.
         let _ = ResponseStream::new(&mut writer, make_buf(4096))
-            .serve_target(&file, Target::Entry(&entry), accepting(NOTHING_ACCEPTED))
+            .serve_target(
+                &file,
+                Target::Entry(&entry),
+                accepting(NOTHING_ACCEPTED),
+                &InflaterPool::default(),
+            )
             .await;
     });
     let head = String::from_utf8_lossy(&writer.written);
@@ -798,7 +845,12 @@ fn run_with_fixture(
             .unwrap();
         let entry = adjust(fixture_entry(&archive, name));
         ResponseStream::new(writer, make_buf(buflen))
-            .serve_target(&file, Target::Entry(&entry), headers)
+            .serve_target(
+                &file,
+                Target::Entry(&entry),
+                headers,
+                &InflaterPool::default(),
+            )
             .await
             .unwrap();
         entry

@@ -1,5 +1,10 @@
 #[cfg(feature = "deflate")]
-use std::{io::ErrorKind, ops::Range};
+use std::{
+    cell::RefCell,
+    io::ErrorKind,
+    ops::{Deref, DerefMut, Range},
+    rc::Rc,
+};
 
 use compio::BufResult;
 use compio::buf::{IntoInner, IoBuf};
@@ -34,7 +39,12 @@ pub(super) enum EntryBody<'e> {
 
 impl<'e> EntryBody<'e> {
     /// Without a `native` coding, `entry` is decoded.
-    pub fn new(entry: &'e Entry, native: Option<NativeCoding>) -> Self {
+    #[cfg_attr(not(feature = "deflate"), expect(unused_variables))]
+    pub fn new(
+        entry: &'e Entry,
+        native: Option<NativeCoding>,
+        inflaters: &'e InflaterPool,
+    ) -> Self {
         match native {
             Some(native) => Self::Native(NativeBody {
                 entry,
@@ -46,7 +56,9 @@ impl<'e> EntryBody<'e> {
                 trailer_pending: true,
             }),
             #[cfg(feature = "deflate")]
-            None if entry.method == Method::Deflate => Self::Inflated(InflatedBody::new(entry)),
+            None if entry.method == Method::Deflate => {
+                Self::Inflated(InflatedBody::new(entry, inflaters))
+            }
             None => Self::Decoded(DecodedBody {
                 fsm: Some(EntryFsm::new(None, None)),
                 offset: entry.header_offset,
@@ -124,21 +136,82 @@ const WINDOW_LEN: usize = 64 * 1024;
 #[cfg(feature = "deflate")]
 const INPUT_LEN: usize = 16 * 1024;
 
+/// Inflaters kept for reuse by the responses of one thread.
+#[derive(Clone, Default)]
+pub struct InflaterPool(#[cfg(feature = "deflate")] Rc<RefCell<Vec<Box<Inflater>>>>);
+
+#[cfg(feature = "deflate")]
+impl InflaterPool {
+    fn lend(&self) -> LentInflater<'_> {
+        let inflater = self.0.borrow_mut().pop().unwrap_or_else(|| {
+            Box::new(Inflater {
+                decoder: Decoder::new(Format::Deflate),
+                window: vec![0; WINDOW_LEN].into_boxed_slice(),
+                input: vec![0; INPUT_LEN].into_boxed_slice(),
+            })
+        });
+        LentInflater {
+            pool: self,
+            inflater: Some(inflater),
+        }
+    }
+}
+
+/// What inflating needs besides the entry. Boxed, because the decoder alone
+/// would double every connection's future.
+#[cfg(feature = "deflate")]
+struct Inflater {
+    decoder: Decoder,
+    window: Box<[u8]>,
+    input: Box<[u8]>,
+}
+
+/// An inflater that goes back to its pool when dropped.
+#[cfg(feature = "deflate")]
+struct LentInflater<'p> {
+    pool: &'p InflaterPool,
+    /// Gone only while being returned.
+    inflater: Option<Box<Inflater>>,
+}
+
+#[cfg(feature = "deflate")]
+impl Deref for LentInflater<'_> {
+    type Target = Inflater;
+
+    fn deref(&self) -> &Inflater {
+        self.inflater.as_ref().expect("inflater should be lent")
+    }
+}
+
+#[cfg(feature = "deflate")]
+impl DerefMut for LentInflater<'_> {
+    fn deref_mut(&mut self) -> &mut Inflater {
+        self.inflater.as_mut().expect("inflater should be lent")
+    }
+}
+
+#[cfg(feature = "deflate")]
+impl Drop for LentInflater<'_> {
+    fn drop(&mut self) {
+        let mut inflater = self.inflater.take().expect("inflater should be lent");
+        // A body dropped early leaves its stream half decoded.
+        inflater.decoder.reset();
+        self.pool.0.borrow_mut().push(inflater);
+    }
+}
+
 /// A deflated entry, inflated and checked against its recorded size and CRC.
 #[cfg(feature = "deflate")]
 pub(super) struct InflatedBody<'e> {
     entry: &'e Entry,
-    /// Boxed, because inline it would double every connection's future.
-    decoder: Box<Decoder>,
-    window: Box<[u8]>,
-    /// How much of `window` the decoder's history takes up.
+    inflater: LentInflater<'e>,
+    /// How much of the window the decoder's history takes up.
     history_len: usize,
-    /// Decoded bytes in `window` that were not handed out yet.
+    /// Decoded bytes in the window that were not handed out yet.
     pending: Range<usize>,
-    /// The decoder needs room in `window` before it can go on.
+    /// The decoder needs room in the window before it can go on.
     window_full: bool,
-    input: Box<[u8]>,
-    /// Compressed bytes in `input` that were not decoded yet.
+    /// Compressed bytes in the input buffer that were not decoded yet.
     unconsumed: Range<usize>,
     /// Where the unread compressed data lies, once the local header was read.
     data_offset: Option<u64>,
@@ -149,15 +222,13 @@ pub(super) struct InflatedBody<'e> {
 
 #[cfg(feature = "deflate")]
 impl<'e> InflatedBody<'e> {
-    fn new(entry: &'e Entry) -> Self {
+    fn new(entry: &'e Entry, inflaters: &'e InflaterPool) -> Self {
         Self {
             entry,
-            decoder: Box::new(Decoder::new(Format::Deflate)),
-            window: vec![0; WINDOW_LEN].into_boxed_slice(),
+            inflater: inflaters.lend(),
             history_len: 0,
             pending: 0..0,
             window_full: false,
-            input: vec![0; INPUT_LEN].into_boxed_slice(),
             unconsumed: 0..0,
             data_offset: None,
             unread: usize::try_from(entry.compressed_size)
@@ -175,12 +246,12 @@ impl<'e> InflatedBody<'e> {
             ((), buf) = buf_try_traced!(self.decode(), buf);
         }
         let n = self.pending.len().min(buf.len() - at);
-        buf[at..at + n].copy_from_slice(&self.window[self.pending.start..][..n]);
+        buf[at..at + n].copy_from_slice(&self.inflater.window[self.pending.start..][..n]);
         self.pending.start += n;
         BufResult(Ok(n), buf)
     }
 
-    /// Reads the next compressed bytes into `input`, by way of `buf[at..]`.
+    /// Reads the next compressed bytes into the input buffer, by way of `buf[at..]`.
     async fn read_input(&mut self, file: &File, mut buf: Buf, at: usize) -> BufResult<(), Buf> {
         let offset = if let Some(offset) = self.data_offset {
             offset
@@ -196,25 +267,27 @@ impl<'e> InflatedBody<'e> {
         let BufResult(res, slice) = file.read_exact_at(buf.slice(at..at + n), offset).await;
         buf = slice.into_inner();
         ((), buf) = buf_try_traced!(res, buf);
-        self.input[..n].copy_from_slice(&buf[at..at + n]);
+        self.inflater.input[..n].copy_from_slice(&buf[at..at + n]);
         self.unconsumed = 0..n;
         self.data_offset = Some(offset + n as u64);
         self.unread -= n;
         BufResult(Ok(()), buf)
     }
 
-    /// Decodes from `input` into `window`, leaving the new bytes pending.
+    /// Decodes from the input buffer into the window, leaving the new bytes pending.
     fn decode(&mut self) -> std::io::Result<()> {
+        let Inflater {
+            decoder,
+            window,
+            input,
+        } = &mut *self.inflater;
         if self.window_full {
             // Only once pending bytes are out, because this moves the window.
-            self.history_len -= self.decoder.make_room(&mut self.window);
+            self.history_len -= decoder.make_room(window);
             self.window_full = false;
         }
-        let progress = self.decoder.decompress(
-            &self.input[self.unconsumed.clone()],
-            &mut self.window,
-            self.unread == 0,
-        )?;
+        let progress =
+            decoder.decompress(&input[self.unconsumed.clone()], window, self.unread == 0)?;
         self.unconsumed.start += progress.consumed;
         self.crc.update(progress.output);
         let start = self.history_len;
@@ -224,8 +297,7 @@ impl<'e> InflatedBody<'e> {
         self.done = progress.done;
 
         let expected_size = self.entry.uncompressed_size;
-        if self.decoder.total_out() > expected_size
-            || (self.done && self.decoder.total_out() < expected_size)
+        if decoder.total_out() > expected_size || (self.done && decoder.total_out() < expected_size)
         {
             return Err(std::io::Error::new(
                 ErrorKind::InvalidData,
