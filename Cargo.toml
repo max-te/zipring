@@ -39,7 +39,6 @@ tracing-subscriber = { version = "0.3.22", features = [
     "ansi",
 ], default-features = false }
 v_htmlescape = "0.15.8"
-winnow = "0.5.40"
 
 [dev-dependencies]
 divan = "0.1"

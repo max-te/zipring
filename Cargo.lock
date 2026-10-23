@@ -1835,7 +1835,6 @@ dependencies = [
  "tracing-subscriber",
  "ureq",
  "v_htmlescape",
- "winnow 0.5.40",
 ]
 
 [[package]]
