@@ -134,10 +134,10 @@ const ZIP_PATH: &str = "tests/resources/Universal_Declaration_of_Human_Rights.ht
 fn request_directory(b: Bencher) {
     let server = ServerHandle::new(ZIP_PATH);
     let mut stream = server.connect();
-    let sample = make_request("/images", &mut stream, "identity").unwrap();
+    let sample = make_request("/images/", &mut stream, "identity").unwrap();
 
     b.counter(BytesCount::new(sample)).bench_local(|| {
-        make_request("/images", &mut stream, "identity").unwrap();
+        make_request("/images/", &mut stream, "identity").unwrap();
     });
 }
 
@@ -171,7 +171,7 @@ fn request_small_file(b: Bencher) {
 /// it, so TCP setup and teardown are inside the timed region and dominate it. A real
 /// workload, but not a measure of how fast an entry is served -- for that see
 /// `benches/server_cpu.rs`, which serves over keep-alive connections.
-#[divan::bench(args = ["/metadata.opf", "/index.html", "/images"], threads = [0,2,4,8], sample_size = 3, sample_count = 1000)]
+#[divan::bench(args = ["/metadata.opf", "/index.html", "/images/"], threads = [0,2,4,8], sample_size = 3, sample_count = 1000)]
 fn connection_churn(b: Bencher, path: &str) {
     let server = ServerHandle::new(ZIP_PATH);
     let sample = {
