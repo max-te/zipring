@@ -227,7 +227,7 @@ impl<'w, W: AsyncWriteExt> ResponseStream<'w, W> {
                     format_args!(
                         "<li{class}><a href=\"./{name_url}{slash}\">{name_html}</a>\n",
                         name_url = utf8_percent_encode(name, PATH_SEGMENT_ENCODING_SET),
-                        name_html = v_htmlescape::escape(name),
+                        name_html = v_htmlescape::escape_fmt(name),
                     ),
                 )
                 .await
