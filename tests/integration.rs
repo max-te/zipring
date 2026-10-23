@@ -457,18 +457,45 @@ fn test_request_multiple_sequential() {
 }
 
 #[test]
-fn test_requests_ureq() {
+fn test_requests_curl() {
     let zip_path = PathBuf::from(TEST_FILE);
     let server = start_server(zip_path);
 
-    let client = ureq::Agent::new_with_defaults();
+    // One handle, so curl reuses the connection across requests
+    let mut client = curl::easy::Easy::new();
+    client.url(&server.uri()).unwrap();
+    let mut request_headers = curl::easy::List::new();
+    request_headers.append("Accept-Encoding: gzip").unwrap();
+    client.http_headers(request_headers).unwrap();
 
     for _ in 0..10 {
-        let mut response = client.get(server.uri()).call().expect("Request failed");
-        assert_eq!(response.status(), 200);
-        assert!(response.headers().get("Content-Encoding").is_some());
-        let body = response.body_mut().read_to_vec();
-        assert!(body.is_ok());
+        let mut header_lines = Vec::new();
+        let mut body = Vec::new();
+        {
+            let mut transfer = client.transfer();
+            transfer
+                .header_function(|line| {
+                    header_lines.push(String::from_utf8_lossy(line).to_ascii_lowercase());
+                    true
+                })
+                .unwrap();
+            transfer
+                .write_function(|data| {
+                    body.extend_from_slice(data);
+                    Ok(data.len())
+                })
+                .unwrap();
+            transfer.perform().expect("Request failed");
+        }
+        assert_eq!(client.response_code().unwrap(), 200);
+        assert!(
+            header_lines
+                .iter()
+                .any(|line| line.starts_with("content-encoding: gzip"))
+        );
+        flate2::read::GzDecoder::new(&body[..])
+            .read_to_end(&mut Vec::new())
+            .expect("should be decodable gzip");
     }
 }
 

@@ -44,9 +44,7 @@ v_htmlescape = "0.17.0"
 divan = "0.1"
 regex = "1.12"
 flate2 = "1.1"
-ureq = { version = "=3.1.4", features = [
-    "gzip",
-], default-features = false } # 3.2.0 transparently removes encoding headers so we can't tell whether the response was compressed
+curl = { version = "0.4.51", default-features = false }
 
 [lints.clippy]
 pedantic = "warn"
