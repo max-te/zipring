@@ -8,6 +8,9 @@ use std::sync::atomic::AtomicU16;
 use std::thread;
 use std::time::Duration;
 
+/// How long a test waits on the server, so that a hung server fails the test.
+const READ_TIMEOUT: Duration = Duration::from_secs(5);
+
 struct ServerHandle {
     process: ManuallyDrop<Child>,
     #[allow(unused)]
@@ -21,6 +24,13 @@ impl ServerHandle {
 
     fn uri(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
+    }
+
+    fn connect(&self) -> std::io::Result<TcpStream> {
+        let stream = TcpStream::connect(self.socket_address())?;
+        stream.set_nodelay(true)?;
+        stream.set_read_timeout(Some(READ_TIMEOUT))?;
+        Ok(stream)
     }
 
     fn wait(&self) {
@@ -113,9 +123,7 @@ fn make_request(
     path: &str,
     encodings: &str,
 ) -> Result<(String, Vec<u8>), std::io::Error> {
-    let mut stream = TcpStream::connect(server.socket_address())?;
-    stream.set_nodelay(true)?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut stream = server.connect()?;
 
     let request = format!(
         "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAccept-Encoding: {encodings}\r\n\r\n"
@@ -203,8 +211,7 @@ fn test_request_split_across_segments() {
     let zip_path = PathBuf::from(TEST_FILE);
     let server = start_server(zip_path);
 
-    let mut stream = TcpStream::connect(server.socket_address()).expect("connect failed");
-    stream.set_nodelay(true).expect("nodelay failed");
+    let mut stream = server.connect().expect("connect failed");
 
     // Two writes with the socket flushed between them, so the server has to read twice.
     stream
@@ -230,8 +237,7 @@ fn test_pipelined_requests() {
     let zip_path = PathBuf::from(TEST_FILE);
     let server = start_server(zip_path);
 
-    let mut stream = TcpStream::connect(server.socket_address()).expect("connect failed");
-    stream.set_nodelay(true).expect("nodelay failed");
+    let mut stream = server.connect().expect("connect failed");
 
     // Both requests in one write, so the server reads them together and must answer
     // the second from bytes it buffered while answering the first.
@@ -427,8 +433,7 @@ fn test_request_etag_caching() {
         assert!(etag.is_some(), "{path}: Response should have ETag header");
 
         // Make a second request with If-None-Match
-        let mut stream = TcpStream::connect(server.socket_address()).expect("Connection failed");
-        stream.set_nodelay(true).unwrap();
+        let mut stream = server.connect().expect("Connection failed");
         let request = format!(
             "GET {path} HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: \"{}\"\r\nConnection: close\r\n\r\n",
             etag.unwrap()
@@ -474,6 +479,7 @@ fn test_requests_curl() {
     // One handle, so curl reuses the connection across requests
     let mut client = curl::easy::Easy::new();
     client.url(&server.uri()).unwrap();
+    client.timeout(READ_TIMEOUT).unwrap();
     let mut request_headers = curl::easy::List::new();
     request_headers.append("Accept-Encoding: gzip").unwrap();
     client.http_headers(request_headers).unwrap();
@@ -622,11 +628,7 @@ fn test_content_length_vs_compressed_size() {
 #[test]
 fn test_connection_close() {
     let server = start_server(TEST_FILE);
-    let mut stream = TcpStream::connect(server.socket_address()).expect("Connection failed");
-    stream.set_nodelay(true).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+    let mut stream = server.connect().expect("Connection failed");
     let request = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     stream.write_all(request.as_bytes()).unwrap();
 
