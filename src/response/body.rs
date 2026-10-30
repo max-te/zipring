@@ -1,7 +1,7 @@
+use std::io::ErrorKind;
 #[cfg(feature = "deflate")]
 use std::{
     cell::RefCell,
-    io::ErrorKind,
     ops::{Deref, DerefMut, Range},
     rc::Rc,
 };
@@ -62,6 +62,7 @@ impl<'e> EntryBody<'e> {
             None => Self::Decoded(DecodedBody {
                 fsm: Some(EntryFsm::new(None, None)),
                 offset: entry.header_offset,
+                remaining: entry.uncompressed_size,
             }),
         }
     }
@@ -323,6 +324,8 @@ pub(super) struct DecodedBody {
     /// Gone once decoding is complete.
     fsm: Option<EntryFsm>,
     offset: u64,
+    /// How many more bytes the entry's recorded size allows.
+    remaining: u64,
 }
 
 impl DecodedBody {
@@ -332,16 +335,19 @@ impl DecodedBody {
         };
         // The decoder may take several reads before it has anything to show.
         loop {
+            let mut at_eof = false;
             if fsm.wants_read() {
-                let room = fsm.space().len().min(buf.len() - at);
+                // The slice stops at the end of `buf`, however much space the decoder has.
+                let space = fsm.space().len();
                 let BufResult(res, slice) =
-                    file.read_at(buf.slice(at..at + room), self.offset).await;
+                    file.read_at(buf.slice(at..at + space), self.offset).await;
                 buf = slice.into_inner();
                 let bytes_read;
                 (bytes_read, buf) = buf_try_traced!(res, buf);
                 fsm.space()[..bytes_read].copy_from_slice(&buf[at..at + bytes_read]);
                 fsm.fill(bytes_read);
                 self.offset += bytes_read as u64;
+                at_eof = bytes_read == 0;
             }
             let outcome;
             (fsm, outcome) = match fsm.process(&mut buf[at..]) {
@@ -350,8 +356,23 @@ impl DecodedBody {
                 Err(err) => bail_traced!(std::io::Error::other(err), buf),
             };
             if outcome.bytes_written > 0 {
+                let written = outcome.bytes_written as u64;
+                if written > self.remaining {
+                    bail_traced!(
+                        std::io::Error::new(
+                            ErrorKind::InvalidData,
+                            "decoded entry exceeds its recorded size",
+                        ),
+                        buf
+                    );
+                }
+                self.remaining -= written;
                 self.fsm = Some(fsm);
                 return BufResult(Ok(outcome.bytes_written), buf);
+            }
+            // The decoder is waiting for input that the file cannot supply.
+            if at_eof && outcome.bytes_read == 0 {
+                bail_traced!(std::io::Error::from(ErrorKind::UnexpectedEof), buf);
             }
         }
     }

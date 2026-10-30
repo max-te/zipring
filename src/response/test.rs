@@ -405,7 +405,8 @@ fn test_serve_long_deflated_entry_inflated() {
 }
 
 /// A method without a native coding goes through `rc_zip`'s own decoder, behind
-/// the staged header and over many writes.
+/// the staged header and over many writes. The fixture holds several bzip2 blocks,
+/// so input is still being read after the first output.
 #[cfg(feature = "bzip2")]
 #[test]
 fn test_serve_bzip2_entry_decoded_over_many_writes() {
@@ -543,15 +544,58 @@ async fn drain(
     }
 }
 
+/// Drains `body` until a fill fails, returning the size of each portion and the error.
+async fn drain_to_failure(
+    mut body: EntryBody<'_>,
+    file: &File,
+    buflen: usize,
+) -> (Vec<usize>, std::io::Error) {
+    let mut buf = make_buf(buflen);
+    let mut portions = Vec::new();
+    loop {
+        let BufResult(res, returned) = body.fill(file, buf, 0).await;
+        buf = returned;
+        match res {
+            Ok(0) => panic!("the body should be refused"),
+            Ok(n) => portions.push(n),
+            Err(err) => return (portions, err),
+        }
+    }
+}
+
 /// Opens the fixture and hands `test` the named entry along with the file.
 fn with_fixture_entry<T>(name: &str, test: impl AsyncFnOnce(&File, Entry) -> T) -> T {
+    with_archive_entry(FIXTURE, name, test)
+}
+
+/// Opens the archive at `path` and hands `test` the named entry along with the file.
+fn with_archive_entry<T>(
+    path: impl AsRef<std::path::Path>,
+    name: &str,
+    test: impl AsyncFnOnce(&File, Entry) -> T,
+) -> T {
     run(async {
-        let file = File::open(FIXTURE).await.unwrap();
+        let file = File::open(path).await.unwrap();
         let archive = crate::rc_zip_compio::read_zip_from_file(&file)
             .await
             .unwrap();
         test(&file, fixture_entry(&archive, name)).await
     })
+}
+
+/// Like [`with_archive_entry`], for an archive held in memory. `label` keeps the
+/// temporary files of tests running in parallel apart.
+fn with_zip_entry<T>(
+    label: &str,
+    zip: &[u8],
+    name: &str,
+    test: impl AsyncFnOnce(&File, Entry) -> T,
+) -> T {
+    let path = std::env::temp_dir().join(format!("zipring-{label}-{}.zip", std::process::id()));
+    std::fs::write(&path, zip).unwrap();
+    let result = with_archive_entry(&path, name, test);
+    std::fs::remove_file(&path).unwrap();
+    result
 }
 
 #[test]
@@ -700,24 +744,67 @@ fn test_entry_body_inflating_past_the_recorded_size_fails() {
     let (portions, err) = with_fixture_entry("index.html", async |file, mut entry| {
         entry.uncompressed_size = RECORDED;
         let inflaters = InflaterPool::default();
-        let mut body = EntryBody::new(&entry, None, &inflaters);
-        let mut buf = make_buf(SMALL_BUF);
-        let mut portions = Vec::new();
-        loop {
-            let BufResult(res, returned) = body.fill(file, buf, 0).await;
-            buf = returned;
-            match res {
-                Ok(0) => panic!("the oversized stream should be refused"),
-                Ok(n) => portions.push(n),
-                Err(err) => return (portions, err),
-            }
-        }
+        let body = EntryBody::new(&entry, None, &inflaters);
+        drain_to_failure(body, file, SMALL_BUF).await
     });
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     assert!(
         portions.iter().sum::<usize>() as u64 <= RECORDED,
         "{portions:?}"
     );
+}
+
+/// `rc_zip` decodes by the local header, so a central directory recording less
+/// must still bound what leaves. A stored entry without a native coding is decoded.
+#[test]
+fn test_entry_body_decoding_past_the_recorded_size_fails() {
+    const RECORDED: u64 = 3000;
+    let content = vec![b'x'; 3 * SMALL_BUF];
+    let zip = crate::rc_zip_compio::test::stored_zip("data.bin", &[], &content);
+    let (portions, err) = with_zip_entry("past-size", &zip, "data.bin", async |file, mut entry| {
+        entry.uncompressed_size = RECORDED;
+        let inflaters = InflaterPool::default();
+        let body = EntryBody::new(&entry, None, &inflaters);
+        drain_to_failure(body, file, SMALL_BUF).await
+    });
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    assert!(
+        portions.iter().sum::<usize>() as u64 <= RECORDED,
+        "{portions:?}"
+    );
+}
+
+/// A read that delivers only part of the local header makes no visible progress,
+/// which must not be mistaken for the archive having ended.
+#[test]
+fn test_entry_body_decoding_through_a_buffer_smaller_than_the_local_header() {
+    const LOCAL_HEADER_MIN_LEN: usize = 30;
+    let zip = crate::rc_zip_compio::test::stored_zip("data.bin", &[], b"content");
+    let bytes = with_zip_entry("tiny-buf", &zip, "data.bin", async |file, entry| {
+        let inflaters = InflaterPool::default();
+        let body = EntryBody::new(&entry, None, &inflaters);
+        drain(body, file, LOCAL_HEADER_MIN_LEN / 2).await.unwrap().1
+    });
+    assert_eq!(bytes, b"content");
+}
+
+/// A local header promising more data than the archive holds must end the body,
+/// rather than leave the decoder waiting for input forever.
+#[test]
+fn test_entry_body_decoding_past_the_end_of_the_archive_fails() {
+    /// Where a local file header records the compressed size.
+    const COMPRESSED_SIZE_OFFSET: usize = 18;
+    let mut zip = crate::rc_zip_compio::test::stored_zip("data.bin", &[], b"content");
+    zip[COMPRESSED_SIZE_OFFSET..COMPRESSED_SIZE_OFFSET + 4]
+        .copy_from_slice(&(1u32 << 20).to_le_bytes());
+    let (_, err) = with_zip_entry("past-eof", &zip, "data.bin", async |file, mut entry| {
+        // The size check must not be what stops this body.
+        entry.uncompressed_size = 1 << 20;
+        let inflaters = InflaterPool::default();
+        let body = EntryBody::new(&entry, None, &inflaters);
+        drain_to_failure(body, file, SMALL_BUF).await
+    });
+    assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
 }
 
 /// A stream ending short of the recorded size would leave the client waiting
