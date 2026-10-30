@@ -1,0 +1,20 @@
+# Optional decoders are compiled out by default, so their code would look untested.
+all_features = true
+
+# Mutants that no useful test can catch.
+# A `\d+:NN:` prefix tells apart mutants that share a label, by column.
+# The column survives edits elsewhere, but must be updated if that line changes.
+exclude_re = [
+    # Logging only.
+    'replace == with != in inner_main',
+    'replace \+= with \*= in inner_main',
+    # The custom Debug output appears only in test failure messages.
+    'impl std::fmt::Debug for FsTreeNode',
+    # Resuming the terminator scan further back only rescans bytes.
+    'request/mod\.rs:\d+:51: replace - with [+/] in RequestReader::next_request',
+    # These only add an empty read after the data ends.
+    "replace > with >= in NativeBody<'_>::fill",
+    "replace > with >= in InflatedBody<'e>::fill",
+    # INPUT_LEN only sets how much is read at a time.
+    'response/body\.rs:\d+:29: replace \* with \+$',
+]
