@@ -404,6 +404,40 @@ fn test_serve_long_deflated_entry_inflated() {
     assert!(body == content, "inflated body differs from the content");
 }
 
+/// A method without a native coding goes through `rc_zip`'s own decoder, behind
+/// the staged header and over many writes.
+#[cfg(feature = "bzip2")]
+#[test]
+fn test_serve_bzip2_entry_decoded_over_many_writes() {
+    const BZIP2_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/resources/bzip2.zip");
+    let mut writer = TestWriter::new();
+    let entry = run(async {
+        let file = File::open(BZIP2_FIXTURE).await.unwrap();
+        let archive = crate::rc_zip_compio::read_zip_from_file(&file)
+            .await
+            .unwrap();
+        let entry = fixture_entry(&archive, "x.txt");
+        ResponseStream::new(&mut writer, make_buf(SMALL_BUF))
+            .serve_target(
+                &file,
+                Target::Entry(&entry),
+                accepting(NOTHING_ACCEPTED),
+                &InflaterPool::default(),
+            )
+            .await
+            .unwrap();
+        entry
+    });
+    let (head, body) = split_response(&writer.written);
+
+    assert!(
+        head.contains(&format!("Content-Length: {}", entry.uncompressed_size)),
+        "{head}"
+    );
+    assert!(writer.writes > 1);
+    assert_entry_contents(&mut &body[..], &entry);
+}
+
 /// An entry with no content still owes its header, which is only ever written
 /// alongside the first body bytes.
 #[test]
@@ -503,6 +537,7 @@ async fn drain(
             n => {
                 portions.push(n);
                 bytes.extend_from_slice(&buf[..n]);
+                assert!(bytes.len() < 1 << 24, "the body should end");
             }
         }
     }
@@ -672,6 +707,7 @@ fn test_entry_body_inflating_past_the_recorded_size_fails() {
             let BufResult(res, returned) = body.fill(file, buf, 0).await;
             buf = returned;
             match res {
+                Ok(0) => panic!("the oversized stream should be refused"),
                 Ok(n) => portions.push(n),
                 Err(err) => return (portions, err),
             }
@@ -682,6 +718,36 @@ fn test_entry_body_inflating_past_the_recorded_size_fails() {
         portions.iter().sum::<usize>() as u64 <= RECORDED,
         "{portions:?}"
     );
+}
+
+/// A stream ending short of the recorded size would leave the client waiting
+/// on the announced Content-Length.
+#[cfg(feature = "deflate")]
+#[test]
+fn test_entry_body_inflating_short_of_the_recorded_size_fails() {
+    let err = with_fixture_entry("index.html", async |file, mut entry| {
+        entry.uncompressed_size += 1;
+        let inflaters = InflaterPool::default();
+        let body = EntryBody::new(&entry, None, &inflaters);
+        drain(body, file, SMALL_BUF)
+            .await
+            .expect_err("should refuse a stream short of its recorded size")
+    });
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+}
+
+/// Input stops at the recorded compressed size, even mid-stream.
+#[cfg(feature = "deflate")]
+#[test]
+fn test_entry_body_inflating_a_truncated_stream_fails() {
+    with_fixture_entry("index.html", async |file, mut entry| {
+        entry.compressed_size /= 2;
+        let inflaters = InflaterPool::default();
+        let body = EntryBody::new(&entry, None, &inflaters);
+        drain(body, file, SMALL_BUF)
+            .await
+            .expect_err("should refuse a stream cut short");
+    });
 }
 
 /// A body dropped halfway leaves its inflater fit for the next body.
@@ -698,6 +764,11 @@ fn test_entry_body_inflates_after_one_was_dropped_early() {
             "the entry should be partly decoded"
         );
         drop(abandoned);
+        assert_eq!(
+            inflaters.idle_len(),
+            1,
+            "the inflater should go back to its pool"
+        );
 
         let body = EntryBody::new(&entry, None, &inflaters);
         let (_, bytes) = drain(body, file, SMALL_BUF).await.unwrap();
@@ -834,6 +905,41 @@ fn test_serve_index_spanning_several_chunks() {
             "{name}"
         );
     }
+}
+
+/// However full a chunk gets, its CRLF and the terminator must still fit.
+/// Directory lines are 11 bytes longer than file lines, so that both parities occur.
+#[test]
+fn test_serve_index_fills_the_last_chunk_to_every_length() {
+    for name_len in 1..470 {
+        let name = "x".repeat(name_len);
+        for entry in [node_file(&name), node_dir(&name)] {
+            let entries = [entry];
+            let mut writer = TestWriter::new();
+            run(async {
+                ResponseStream::new(&mut writer, make_buf(1024))
+                    .serve_index(true, &entries)
+                    .await
+                    .unwrap();
+            });
+            let (_head, framed) = split_response(&writer.written);
+            let body = String::from_utf8(decode_chunked(&framed)).unwrap();
+            assert!(body.contains(&name), "{name_len}");
+        }
+    }
+}
+
+/// A name that no chunk can hold ends the response rather than looping.
+#[test]
+fn test_serve_index_refuses_a_name_too_long_for_any_chunk() {
+    let entries = vec![node_file(&"x".repeat(2048))];
+    let mut writer = TestWriter::new();
+    let res = run(async {
+        ResponseStream::new(&mut writer, make_buf(1024))
+            .serve_index(true, &entries)
+            .await
+    });
+    assert!(res.0.is_err());
 }
 
 /// Serve one fixture entry, letting `adjust` alter it first, and hand back the entry

@@ -155,6 +155,11 @@ impl InflaterPool {
             inflater: Some(inflater),
         }
     }
+
+    #[cfg(test)]
+    pub(super) fn idle_len(&self) -> usize {
+        self.0.borrow().len()
+    }
 }
 
 /// What inflating needs besides the entry. Boxed, because the decoder alone

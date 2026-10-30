@@ -350,6 +350,13 @@ mod test {
         assert!(err.contains("bogus"), "{err}");
     }
 
+    #[test]
+    fn a_returned_buffer_stays_in_the_pool() {
+        let pool = BufPool::default();
+        return_buf(&pool, take_buf(&pool));
+        assert_eq!(pool.borrow().len(), 1);
+    }
+
     /// The environment is read into the very flags that `parse` yields.
     #[test]
     fn from_env_reads_the_flag_list() {

@@ -239,10 +239,10 @@ mod tests {
     fn test_dir_via_trailing_slash() {
         let mut root = FsTreeNode::<i32>::root();
         root.insert_at(42, "subdir/".to_string());
-        assert!(matches!(
-            root.find("subdir").unwrap(),
-            FsTreeNode::Dir { .. }
-        ));
+        let FsTreeNode::Dir { children, .. } = root.find("subdir").unwrap() else {
+            panic!("subdir should be a Dir");
+        };
+        assert!(children.is_empty(), "{children:?}");
     }
 
     #[test]
