@@ -774,6 +774,22 @@ fn test_entry_body_decoding_past_the_recorded_size_fails() {
     );
 }
 
+/// `rc_zip` decodes by the local header, so a central directory recording more
+/// would leave the client waiting on the announced Content-Length.
+#[test]
+fn test_entry_body_decoding_short_of_the_recorded_size_fails() {
+    let zip = crate::rc_zip_compio::test::stored_zip("data.bin", &[], b"content");
+    let err = with_zip_entry("short-size", &zip, "data.bin", async |file, mut entry| {
+        entry.uncompressed_size += 1;
+        let inflaters = InflaterPool::default();
+        let body = EntryBody::new(&entry, None, &inflaters);
+        drain(body, file, SMALL_BUF)
+            .await
+            .expect_err("should refuse a body short of its recorded size")
+    });
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+}
+
 /// A read that delivers only part of the local header makes no visible progress,
 /// which must not be mistaken for the archive having ended.
 #[test]

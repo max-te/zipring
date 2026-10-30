@@ -352,7 +352,18 @@ impl DecodedBody {
             let outcome;
             (fsm, outcome) = match fsm.process(&mut buf[at..]) {
                 Ok(FsmResult::Continue(continued)) => continued,
-                Ok(FsmResult::Done(_buffer)) => return BufResult(Ok(0), buf),
+                Ok(FsmResult::Done(_buffer)) => {
+                    if self.remaining > 0 {
+                        bail_traced!(
+                            std::io::Error::new(
+                                ErrorKind::InvalidData,
+                                "decoded entry falls short of its recorded size",
+                            ),
+                            buf
+                        );
+                    }
+                    return BufResult(Ok(0), buf);
+                }
                 Err(err) => bail_traced!(std::io::Error::other(err), buf),
             };
             if outcome.bytes_written > 0 {
