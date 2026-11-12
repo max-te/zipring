@@ -4,3 +4,6 @@ updates:
     directory: "/" # Location of package manifests
     schedule:
       interval: "weekly"
+    # Matches global-min-publish-age in .cargo/config.toml.
+    cooldown:
+      default-days: 2
