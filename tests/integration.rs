@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::mem::ManuallyDrop;
+use std::mem::DropGuard;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::Child;
@@ -12,7 +12,7 @@ use std::time::Duration;
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct ServerHandle {
-    process: ManuallyDrop<Child>,
+    _process: DropGuard<Child, fn(Child)>,
     #[allow(unused)]
     port: u16,
 }
@@ -54,20 +54,17 @@ impl ServerHandle {
     }
 }
 
-impl Drop for ServerHandle {
-    fn drop(&mut self) {
-        let mut process = unsafe { ManuallyDrop::take(&mut self.process) };
-        let _ = process.kill();
-        let res = process.wait_with_output();
-        match res {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                println!("===== Server stdout:\n{stdout}\n=====");
-                println!("===== Server stderr:\n{stderr}\n=====");
-            }
-            Err(err) => eprintln!("Error waiting for server: {err}"),
+fn stop_and_print_output(mut process: Child) {
+    let _ = process.kill();
+    let res = process.wait_with_output();
+    match res {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            println!("===== Server stdout:\n{stdout}\n=====");
+            println!("===== Server stderr:\n{stderr}\n=====");
         }
+        Err(err) => eprintln!("Error waiting for server: {err}"),
     }
 }
 
@@ -75,7 +72,7 @@ fn start_server(zip_path: impl Into<PathBuf>) -> ServerHandle {
     let port = find_free_port();
     let exe = env!("CARGO_BIN_EXE_zipring");
     let server = ServerHandle {
-        process: ManuallyDrop::new(
+        _process: DropGuard::new(
             std::process::Command::new(exe)
                 .arg(zip_path.into())
                 .env("PORT", port.to_string())
@@ -87,6 +84,7 @@ fn start_server(zip_path: impl Into<PathBuf>) -> ServerHandle {
                 .stderr(std::process::Stdio::piped())
                 .spawn()
                 .expect("Failed to start server"),
+            stop_and_print_output,
         ),
         port,
     };
