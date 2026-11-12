@@ -1014,22 +1014,23 @@ fn test_serve_index_spanning_several_chunks() {
 /// Directory lines are 11 bytes longer than file lines, so that both parities occur.
 #[test]
 fn test_serve_index_fills_the_last_chunk_to_every_length() {
-    for name_len in 1..470 {
-        let name = "x".repeat(name_len);
-        for entry in [node_file(&name), node_dir(&name)] {
-            let entries = [entry];
-            let mut writer = TestWriter::new();
-            run(async {
+    // One runtime for all lengths, because each runtime sets up an io_uring.
+    run(async {
+        for name_len in 1..470 {
+            let name = "x".repeat(name_len);
+            for entry in [node_file(&name), node_dir(&name)] {
+                let entries = [entry];
+                let mut writer = TestWriter::new();
                 ResponseStream::new(&mut writer, make_buf(1024))
                     .serve_index(true, &entries)
                     .await
                     .unwrap();
-            });
-            let (_head, framed) = split_response(&writer.written);
-            let body = String::from_utf8(decode_chunked(&framed)).unwrap();
-            assert!(body.contains(&name), "{name_len}");
+                let (_head, framed) = split_response(&writer.written);
+                let body = String::from_utf8(decode_chunked(&framed)).unwrap();
+                assert!(body.contains(&name), "{name_len}");
+            }
         }
-    }
+    });
 }
 
 /// A name that no chunk can hold ends the response rather than looping.
