@@ -266,7 +266,7 @@ impl Client {
                 .read_line(&mut line)
                 .expect("header is readable");
             assert!(read != 0, "server closed the connection mid-response");
-            let line = line.trim_end_matches("\r\n");
+            let line = line.trim_suffix("\r\n");
             if line.is_empty() {
                 break;
             }
@@ -286,7 +286,7 @@ impl Client {
                 self.reader
                     .read_line(&mut line)
                     .expect("chunk size readable");
-                let size = usize::from_str_radix(line.trim_end_matches("\r\n"), 16)
+                let size = usize::from_str_radix(line.trim_suffix("\r\n"), 16)
                     .expect("chunk size should be hex");
                 if size == 0 {
                     self.reader

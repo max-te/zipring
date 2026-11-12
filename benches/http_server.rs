@@ -89,7 +89,7 @@ fn make_request(
         if bytes_read == 0 {
             break;
         }
-        let line = line.trim_end_matches("\r\n");
+        let line = line.trim_suffix("\r\n");
         if line.is_empty() {
             break;
         }
@@ -110,7 +110,7 @@ fn make_request(
         loop {
             chunk_size.clear();
             reader.read_line(&mut chunk_size)?;
-            let chunk_size = <usize>::from_str_radix(chunk_size.trim_end_matches("\r\n"), 16)
+            let chunk_size = <usize>::from_str_radix(chunk_size.trim_suffix("\r\n"), 16)
                 .expect("Chunk size should be hex");
             if chunk_size == 0 {
                 reader.read_exact(&mut [0; 2])?;

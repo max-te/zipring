@@ -142,7 +142,7 @@ fn make_request(
         if bytes_read == 0 {
             break;
         }
-        let line = line.trim_end_matches("\r\n");
+        let line = line.trim_suffix("\r\n");
         if line.is_empty() {
             break;
         }
@@ -164,7 +164,7 @@ fn make_request(
         loop {
             let mut chunk_size = String::new();
             reader.read_line(&mut chunk_size)?;
-            let chunk_size = <usize>::from_str_radix(chunk_size.trim_end_matches("\r\n"), 16)
+            let chunk_size = <usize>::from_str_radix(chunk_size.trim_suffix("\r\n"), 16)
                 .expect("Chunk size should be hex");
             if chunk_size == 0 {
                 reader.read_exact(&mut [0; 2])?;
@@ -258,7 +258,7 @@ fn test_pipelined_requests() {
                 read != 0,
                 "connection closed before the {expected} response"
             );
-            let line = line.trim_end_matches("\r\n");
+            let line = line.trim_suffix("\r\n");
             if line.is_empty() {
                 break;
             }
@@ -422,11 +422,7 @@ fn test_request_etag_caching() {
         let etag = headers
             .lines()
             .find(|line| line.contains("ETag:"))
-            .map(|line| {
-                line.trim_start_matches("ETag: ")
-                    .trim_matches('"')
-                    .to_string()
-            });
+            .map(|line| line.trim_prefix("ETag: ").trim_matches('"').to_string());
 
         assert!(etag.is_some(), "{path}: Response should have ETag header");
 
@@ -685,7 +681,7 @@ fn test_serve_archive_without_an_encoding_flag() {
     assert_eq!(hrefs.len(), 3, "every entry should be listed: {listing}");
 
     for href in hrefs {
-        let path = format!("/{}", href.trim_start_matches("./"));
+        let path = format!("/{}", href.trim_prefix("./"));
         let (headers, body) = make_request(&server, &path, "gzip")
             .unwrap_or_else(|e| panic!("request for {path} failed: {e}"));
         assert!(headers.contains("200 OK"), "{path}: {headers}");
