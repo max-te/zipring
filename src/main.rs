@@ -43,9 +43,6 @@ fn return_buf(pool: &BufPool, buf: Buf) {
     pool.borrow_mut().push(buf);
 }
 
-#[derive(Debug)]
-enum Never {}
-
 /// Optional `io_uring` setup flags, chosen by the `ZIPRING_URING_FLAGS` environment
 /// variable so that a build can be measured against itself without recompiling.
 #[derive(Clone, Copy, Default, Debug)]
@@ -140,7 +137,7 @@ fn main() -> Result<()> {
     let mut threads: Vec<_> = (0..n_threads)
         .map(|i| {
             let file = dup(&file)?;
-            Ok(std::thread::spawn(move || -> Result<Never> {
+            Ok(std::thread::spawn(move || -> Result<!> {
                 let rt = build_runtime(uring_flags)?;
                 rt.block_on(inner_main(i, into_compio(file), port, tree))
             }))
@@ -208,7 +205,7 @@ async fn inner_main(
     file: File,
     port: u16,
     tree: &'static FsTreeNode,
-) -> Result<Never> {
+) -> Result<!> {
     let buf_pool: BufPool = Rc::new(RefCell::new(Vec::new()));
     let inflaters = InflaterPool::default();
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
